@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 from streamlit.runtime.scriptrunner import get_script_run_ctx
-import plotly.express as px
+
 import plotly.graph_objects as go
 
 DB_PATH = Path(__file__).parent / "dbase.db"
