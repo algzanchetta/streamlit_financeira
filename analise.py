@@ -7,8 +7,6 @@ import pandas as pd
 import streamlit as st
 from streamlit.runtime.scriptrunner import get_script_run_ctx
 
-import plotly.graph_objects as go
-
 DB_PATH = Path(__file__).parent / "dbase.db"
 
 # Paleta consistente do dashboard
