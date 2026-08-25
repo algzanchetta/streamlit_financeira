@@ -1,4 +1,29 @@
-streamlit
-pandas
-numpy
-plotly
+# =============================================================================
+# REQUIREMENTS - Painel Financeiro de Microcrédito
+# =============================================================================
+# Arquivo de dependências do projeto.
+# Instalação: pip install -r requirements.txt
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# DEPENDÊNCIAS ESSENCIAIS (obrigatórias para o dashboard funcionar)
+# -----------------------------------------------------------------------------
+streamlit>=1.30.0
+pandas>=2.0.0
+numpy>=1.24.0
+plotly>=5.18.0
+
+# -----------------------------------------------------------------------------
+# MODELOS PREDITIVOS (opcionais, mas recomendados)
+# -----------------------------------------------------------------------------
+# Usados em: PD (Random Forest), Clustering (KMeans), Detecção de Anomalias (Isolation Forest)
+scikit-learn>=1.3.0
+
+# Usado em: Forecast de recebíveis (séries temporais)
+prophet>=1.1.4
+
+# -----------------------------------------------------------------------------
+# UTILITÁRIOS (opcional, para performance e cache)
+# -----------------------------------------------------------------------------
+# Acelera operações de dataframes grandes
+pyarrow>=14.0.0
