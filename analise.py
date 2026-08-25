@@ -695,7 +695,20 @@ def build_insights(agente, backlog, eficiencia, recebido, aberto, aberto_90, pdd
 # UI
 # ---------------------------------------------------------------------------
 def main():
-    st.set_page_config(page_title="Painel Financeiro - Microcredito", layout="wide", initial_sidebar_state="expanded")
+    st.set_page_config(page_title="Analise Atual - Microcredito", layout="wide", initial_sidebar_state="expanded")
+
+    # ---------------- Navegacao entre analises ----------------
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("**Navegacao entre Analises:**")
+    st.sidebar.markdown(
+        "<div style='display:flex;gap:6px;flex-wrap:wrap;'>"
+        "<span style='background:#4C78A8;color:white;padding:4px 10px;border-radius:6px;font-weight:bold;font-size:13px;'>Modelo Atual</span>"
+        "<a href='/analise2' target='_self' style='background:#F58518;color:white;padding:4px 10px;border-radius:6px;text-decoration:none;font-size:13px;'>Modelo Antigo</a>"
+        "<a href='/analise3' target='_self' style='background:#54A24B;color:white;padding:4px 10px;border-radius:6px;text-decoration:none;font-size:13px;'>Todos os Modelos</a>"
+        "</div>",
+        unsafe_allow_html=True,
+    )
+    st.sidebar.markdown("---")
 
     # ---------------- Sidebar ----------------
     st.sidebar.header("Filtros")
@@ -834,7 +847,7 @@ def main():
 
     st.title("Painel Financeiro - Microcredito Diario")
     st.caption(
-        "Carteira atual (contratos2/movimentacoes2): microcredito de 90 parcelas diarias (Pix). "
+        ":blue[__Modelo Atual__] (contratos2/movimentacoes2): microcredito de 90 parcelas diarias (Pix). "
         "Fonte: dbase.db."
     )
 
