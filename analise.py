@@ -1,5 +1,5 @@
 import sqlite3
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 import numpy as np
 import pandas as pd
@@ -8,6 +8,14 @@ from streamlit.runtime.scriptrunner import get_script_run_ctx
 import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+import random
+
+# Tentar importar Faker para gerar dados fictícios
+try:
+    from faker import Faker
+    FAKER_AVAILABLE = True
+except ImportError:
+    FAKER_AVAILABLE = False
 
 try:
     from sklearn.ensemble import RandomForestClassifier, IsolationForest
@@ -46,8 +54,7 @@ PDD_FAIXAS_DEFAULT = [
     ("1-30 dias", 1, 30, 0.02),
     ("31-60 dias", 31, 60, 0.10),
     ("61-90 dias", 61, 90, 0.30),
-    ("91-180 dias", 91, 180, 0.50),
-    ("181+ dias", 181, 10_000, 1.00),
+    ("90+ dias", 91, 10_000, 0.50),
 ]
 
 GLOSSARIO = {
@@ -61,7 +68,155 @@ GLOSSARIO = {
     "HHI": "Índice Herfindahl-Hirschman - mede concentração da carteira.",
     "Curing Curve": "Curva de cura - mostra % do saldo vencido recuperado ao longo do tempo.",
     "PD": "Probability of Default - probabilidade de um contrato entrar em default.",
+    "90+": "Contratos com atraso superior a 90 dias - considerados de alto risco.",
 }
+
+# =============================================================================
+# GERADOR DE DADOS FAKE
+# =============================================================================
+def generate_fake_data(num_usuarios=8, num_clientes=300, num_contratos=500, num_movimentos=3000):
+    """Gera dados fictícios para demonstração do painel."""
+    
+    if not FAKER_AVAILABLE:
+        return None, None, None, None
+    
+    fake = Faker('pt_BR')
+    Faker.seed(42)
+    random.seed(42)
+    np.random.seed(42)
+    
+    today = date.today()
+    
+    # 1. Gerar usuários (agentes)
+    usuarios_data = []
+    for i in range(num_usuarios):
+        usuarios_data.append({
+            "id": i + 1,
+            "usuario": fake.name(),
+            "email": fake.email(),
+            "ativo": random.choice([0, 1])
+        })
+    usuarios = pd.DataFrame(usuarios_data)
+    
+    # 2. Gerar clientes
+    clientes_data = []
+    estabelecimentos = [
+        "Restaurante do João", "Pizza Nova", "Bar do Zé", "Padaria Pão Quente",
+        "Supermercado Bom Preço", "Farmácia Saúde", "Loja de Roupas Fashion",
+        "Mecânica do Chico", "Salão de Beleza Vênus", "Mercearia da Dona Maria",
+        "Construmaterial", "Lanchonete Sabor", "Hotel Parque", "Vendedor Ambulante",
+        "Academia Fitness", "Pet Shop Amigo", "Papelaria Escolar", "Ótica Visão",
+        "Joalheria Ouro", "Eletrônicos Tech"
+    ]
+    
+    generos = ["Masculino", "Feminino"]
+    avaliacoes = ["A", "B", "C", "D"]
+    
+    for i in range(num_clientes):
+        idade = random.randint(18, 75)
+        clientes_data.append({
+            "id": i + 1,
+            "cliente": fake.name(),
+            "idade": idade,
+            "genero": random.choice(generos),
+            "cpf": fake.cpf(),
+            "telefone": fake.phone_number(),
+            "avaliacao": random.choice(avaliacoes),
+            "nome_estabelecimento": random.choice(estabelecimentos),
+            "endereco": fake.address(),
+            "cidade": fake.city(),
+            "estado": fake.state_abbr(),
+        })
+    clientes = pd.DataFrame(clientes_data)
+    
+    # 3. Gerar contratos
+    contratos_data = []
+    status_options = ["Ativo", "Finalizado", "Cancelado"]
+    
+    for i in range(num_contratos):
+        idcliente = random.randint(1, num_clientes)
+        idusuario = random.randint(1, num_usuarios)
+        valor = random.uniform(500, 5000)
+        qtd_parcela = random.choice([30, 60, 90, 120, 180])
+        dtinicio = fake.date_between(start_date='-180d', end_date='-1d')
+        dtfim = dtinicio + timedelta(days=qtd_parcela)
+        
+        taxa_juros = random.uniform(0.05, 0.15)
+        valor_parcelado = valor * (1 + taxa_juros)
+        
+        contratos_data.append({
+            "id": i + 1,
+            "idcliente": idcliente,
+            "idusuario": idusuario,
+            "valor": round(valor, 2),
+            "valor_parcelado": round(valor_parcelado, 2),
+            "qtd_parcela": qtd_parcela,
+            "dtinicio": dtinicio,
+            "dtfim": dtfim,
+            "dtatualizacao": fake.date_between(start_date='-30d', end_date='today'),
+            "status": random.choices(status_options, weights=[0.7, 0.2, 0.1])[0],
+            "observacao": fake.sentence()
+        })
+    contratos = pd.DataFrame(contratos_data)
+    
+    # 4. Gerar movimentações (parcelas)
+    movimentos_data = []
+    
+    for _, contrato in contratos.iterrows():
+        contrato_id = contrato["id"]
+        idcliente = contrato["idcliente"]
+        idusuario = contrato["idusuario"]
+        valor_parcela = contrato["valor_parcelado"] / contrato["qtd_parcela"]
+        dtinicio = contrato["dtinicio"]
+        
+        for parcela_num in range(1, contrato["qtd_parcela"] + 1):
+            dtvenc = dtinicio + timedelta(days=parcela_num)
+            
+            # status_pago: 1 = pago, 0 = não pago
+            status_pago = random.choices([0, 1], weights=[0.3, 0.7])[0]
+            
+            if status_pago == 0 and dtvenc < today:
+                if random.random() < 0.3:
+                    status_pago = 1
+                    dtrecebimento = dtvenc + timedelta(days=random.randint(1, 90))
+                    valorrecebido = valor_parcela * random.uniform(0.8, 1.0)
+                    desconto = valor_parcela - valorrecebido if random.random() < 0.2 else 0
+                else:
+                    dtrecebimento = None
+                    valorrecebido = 0
+                    desconto = 0
+            else:
+                if status_pago == 1:
+                    dtrecebimento = dtvenc + timedelta(days=random.randint(-5, 5))
+                    valorrecebido = valor_parcela
+                    desconto = 0
+                else:
+                    dtrecebimento = None
+                    valorrecebido = 0
+                    desconto = 0
+            
+            movimentos_data.append({
+                "id": len(movimentos_data) + 1,
+                "idcontrato": contrato_id,
+                "idcliente": idcliente,
+                "idusuario": idusuario,
+                "dtinicio": dtinicio,
+                "dtvenc": dtvenc,
+                "dtrecebimento": dtrecebimento,
+                "valorcontrato": contrato["valor"],
+                "areceber": valor_parcela if status_pago == 0 else 0,
+                "valorrecebido": round(valorrecebido, 2),
+                "desconto": round(desconto, 2),
+                "recebido": status_pago,
+                "status_pago": status_pago == 1,
+                "ok": "Sim" if status_pago == 1 else "Nao",
+                "dtfim": contrato["dtfim"],
+                "dtatualizacao": today,
+            })
+    
+    movimentos = pd.DataFrame(movimentos_data)
+    
+    return usuarios, clientes, contratos, movimentos
 
 # =============================================================================
 # UTILITÁRIOS
@@ -120,22 +275,66 @@ def normalize_estabelecimento(name: str) -> str:
         return first
     return "OUTROS"
 
-# =============================================================================
-# CARREGAMENTO DE DADOS
-# =============================================================================
-@st.cache_data
-def load_data():
-    conn = sqlite3.connect(DB_PATH)
-    usuarios = pd.read_sql_query("SELECT * FROM usuarios", conn)
-    clientes = pd.read_sql_query("SELECT * FROM clientes", conn)
-    contratos = pd.read_sql_query("SELECT * FROM contratos2", conn)
-    movimentos = pd.read_sql_query("SELECT * FROM contratos_movimentacoes2", conn)
-    conn.close()
+def ensure_datetime(df, columns):
+    """Garante que as colunas especificadas sejam datetime."""
+    for col in columns:
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col], errors='coerce')
+    return df
 
+# =============================================================================
+# CARREGAMENTO DE DADOS (CORRIGIDO)
+# =============================================================================
+@st.cache_data(ttl=60)
+def load_data(use_fake=False):
+    """Carrega dados do banco ou gera dados fictícios, aplicando o mesmo processamento."""
+    
+    usuarios, clientes, contratos, movimentos = None, None, None, None
+    
+    # 1. Gera ou carrega os dados brutos
+    if use_fake and FAKER_AVAILABLE:
+        usuarios, clientes, contratos, movimentos = generate_fake_data(
+            num_usuarios=8,
+            num_clientes=300,
+            num_contratos=500,
+            num_movimentos=3000
+        )
+    else:
+        # Carrega do banco
+        if use_fake and not FAKER_AVAILABLE:
+            st.warning("Faker não instalado. Usando dados reais do banco.")
+        
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            usuarios = pd.read_sql_query("SELECT * FROM usuarios", conn)
+            clientes = pd.read_sql_query("SELECT * FROM clientes", conn)
+            contratos = pd.read_sql_query("SELECT * FROM contratos2", conn)
+            movimentos = pd.read_sql_query("SELECT * FROM contratos_movimentacoes2", conn)
+            conn.close()
+        except Exception as e:
+            st.error(f"Erro ao carregar dados do banco: {e}")
+            if FAKER_AVAILABLE:
+                st.info("Gerando dados fictícios como fallback...")
+                usuarios, clientes, contratos, movimentos = generate_fake_data()
+            else:
+                return None, None, None, None
+    
+    # Verifica se os dados foram carregados
+    if usuarios is None or clientes is None or contratos is None or movimentos is None:
+        return None, None, None, None
+    
+    # =============================================================================
+    # 2. PROCESSAMENTO COMUM (SEMPRE executado, independente da origem dos dados)
+    # =============================================================================
+    
+    # --- Clientes ---
+    clientes = ensure_datetime(clientes, ["dtinicio", "dtfim", "dtatualizacao"])
     clientes["idade"] = pd.to_numeric(clientes.get("idade"), errors="coerce")
     clientes["idade"] = clientes["idade"].where(clientes["idade"] > 0, np.nan)
     clientes["genero"] = clientes.get("genero").astype(str).str.strip()
-    clientes["genero_cat"] = clientes["genero"].map({"1": "Masculino", "0": "Feminino"}).fillna("Outro")
+    # Corrige o mapeamento para aceitar tanto "1"/"0" quanto "Masculino"/"Feminino"
+    clientes["genero_cat"] = clientes["genero"].replace({"1": "Masculino", "0": "Feminino"}).fillna("Outro")
+    
     idade_bins = [0, 18, 25, 35, 45, 55, 65, 200]
     idade_labels = ["<18", "18-25", "26-35", "36-45", "46-55", "56-65", ">65"]
     clientes["faixa_idade"] = pd.cut(clientes["idade"], bins=idade_bins, labels=idade_labels)
@@ -143,12 +342,13 @@ def load_data():
     clientes["avaliacao"] = clientes["avaliacao"].astype(str).fillna("Nao avaliado")
     clientes["nome_estabelecimento"] = clientes["nome_estabelecimento"].astype(str).fillna("Desconhecido")
 
-    for col in ["dtinicio", "dtfim", "dtatualizacao"]:
-        contratos[col] = parse_dt(contratos.get(col))
+    # --- Contratos ---
+    contratos = ensure_datetime(contratos, ["dtinicio", "dtfim", "dtatualizacao"])
     contratos["valor"] = pd.to_numeric(contratos.get("valor"), errors="coerce").fillna(0)
     contratos["valor_parcelado"] = pd.to_numeric(contratos.get("valor_parcelado"), errors="coerce")
     contratos["valor_parcelado"] = contratos["valor_parcelado"].fillna(contratos["valor"])
     contratos["qtd_parcela"] = pd.to_numeric(contratos.get("qtd_parcela"), errors="coerce").fillna(0)
+    
     contratos["parcela_esperada"] = np.where(
         contratos["qtd_parcela"] > 0, contratos["valor_parcelado"] / contratos["qtd_parcela"], 0
     )
@@ -156,21 +356,27 @@ def load_data():
         contratos["valor_parcelado"] > 0, contratos["valor"] / contratos["valor_parcelado"], 0
     )
     contratos["juros_previstos"] = contratos["valor_parcelado"] - contratos["valor"]
+    
     contratos = contratos.merge(
         clientes[["id", "cliente", "genero_cat", "faixa_idade", "avaliacao", "nome_estabelecimento"]],
         left_on="idcliente", right_on="id", how="left", suffixes=("", "_cliente"),
     )
-    contratos["usuario_nome"] = contratos["idusuario"].map(usuarios.set_index("id")["usuario"])
+    if "usuario" in usuarios.columns:
+        contratos["usuario_nome"] = contratos["idusuario"].map(usuarios.set_index("id")["usuario"])
 
-    for col in ["dtinicio", "dtfim", "dtvenc", "dtrecebimento"]:
-        movimentos[col] = parse_dt(movimentos.get(col))
+    # --- Movimentos ---
+    movimentos = ensure_datetime(movimentos, ["dtinicio", "dtfim", "dtvenc", "dtrecebimento", "dtatualizacao"])
     movimentos["valorrecebido"] = pd.to_numeric(movimentos.get("valorrecebido"), errors="coerce").fillna(0)
     movimentos["areceber"] = pd.to_numeric(movimentos.get("areceber"), errors="coerce").fillna(0)
     movimentos["valorcontrato"] = pd.to_numeric(movimentos.get("valorcontrato"), errors="coerce").fillna(0)
     movimentos["desconto"] = pd.to_numeric(movimentos.get("desconto"), errors="coerce").fillna(0)
     movimentos["recebido"] = pd.to_numeric(movimentos.get("recebido"), errors="coerce")
     movimentos["paid"] = movimentos["recebido"] == 1
-    movimentos["status_pago"] = movimentos["paid"] | (movimentos["ok"].astype(str).str.lower() == "sim")
+    
+    if "ok" in movimentos.columns:
+        movimentos["status_pago"] = movimentos["paid"] | (movimentos["ok"].astype(str).str.lower() == "sim")
+    else:
+        movimentos["status_pago"] = movimentos["paid"]
 
     movimentos = movimentos.merge(
         contratos[["id", "parcela_esperada", "frac_principal", "valor", "valor_parcelado",
@@ -182,13 +388,17 @@ def load_data():
     movimentos["juros_frac"] = 1.0 - movimentos["frac_principal"]
 
     today = pd.Timestamp(date.today())
+    
     def compute_delay(row):
-        if pd.isna(row["dtvenc"]): return 0
+        if pd.isna(row["dtvenc"]): 
+            return 0
         if pd.notna(row["dtrecebimento"]):
             return max((row["dtrecebimento"] - row["dtvenc"]).days, 0)
         return max((today - row["dtvenc"]).days, 0)
+    
     movimentos["dias_atraso"] = movimentos.apply(compute_delay, axis=1)
 
+    # >>> COLUNAS CRÍTICAS QUE ESTAVAM FALTANDO <<<
     movimentos["vencido"] = (~movimentos["status_pago"]) & movimentos["dtvenc"].notna() & (movimentos["dtvenc"] < today)
     movimentos["a_vencer"] = (~movimentos["status_pago"]) & movimentos["dtvenc"].notna() & (movimentos["dtvenc"] >= today)
     movimentos["atraso_90"] = movimentos["vencido"] & (movimentos["dias_atraso"] >= 90)
@@ -199,7 +409,8 @@ def load_data():
     )
     movimentos["nome_estabelecimento"] = movimentos["nome_estabelecimento"].fillna("Desconhecido")
     movimentos["nome_estabelecimento_norm"] = movimentos["nome_estabelecimento"].astype(str).apply(normalize_estabelecimento)
-    movimentos["usuario_nome"] = movimentos["idusuario"].map(usuarios.set_index("id")["usuario"])
+    if "usuario" in usuarios.columns:
+        movimentos["usuario_nome"] = movimentos["idusuario"].map(usuarios.set_index("id")["usuario"])
 
     movimentos = movimentos.sort_values(["idcontrato", "dtvenc"])
     movimentos["num_parcela"] = movimentos.groupby("idcontrato").cumcount() + 1
@@ -216,6 +427,7 @@ def load_data():
         max_atraso=("dias_atraso", "max"),
         avg_atraso=("dias_atraso", "mean"),
     ).reset_index()
+    
     contratos = contratos.merge(contrato_agg, left_on="id", right_on="idcontrato", how="left").fillna(
         {c: 0 for c in ["total_recebido", "total_desconto", "total_aberto", "aberto_nao_pago",
                         "parcelas_pagas", "parcelas_total", "vencido_valor", "max_atraso", "avg_atraso"]}
@@ -239,14 +451,26 @@ def filter_cancelled_contracts(contratos, movimentos):
     excluded = contratos[contratos["cancelado_sem_movimento"]].copy()
     return valid, valid_mov, excluded
 
+# =============================================================================
+# FUNÇÃO CORRIGIDA - apply_period_filter
+# =============================================================================
 def apply_period_filter(contratos, movimentos, start_date, end_date):
+    # Converter para Timestamp para comparação correta
     st_ts = pd.Timestamp(start_date)
     en_ts = pd.Timestamp(end_date) + pd.Timedelta(days=1)
-    movimentos_f = movimentos[
-        movimentos["dtvenc"].notna() &
-        (movimentos["dtvenc"] >= st_ts) &
-        (movimentos["dtvenc"] < en_ts)
-    ].copy()
+    
+    # Garantir que a coluna dtvenc seja datetime e não tenha valores nulos
+    movimentos = movimentos.copy()
+    movimentos["dtvenc"] = pd.to_datetime(movimentos["dtvenc"], errors='coerce')
+    
+    # Filtrar apenas linhas com dtvenc não nulo
+    mask = movimentos["dtvenc"].notna()
+    
+    # Filtrar pelo período usando comparação direta com Timestamp (mais seguro)
+    mask = mask & (movimentos["dtvenc"] >= st_ts) & (movimentos["dtvenc"] < en_ts)
+    
+    movimentos_f = movimentos[mask].copy()
+    
     contratos_ids = movimentos_f["idcontrato"].unique()
     contratos_f = contratos[contratos["id"].isin(contratos_ids)].copy()
     return contratos_f, movimentos_f
@@ -256,6 +480,10 @@ def apply_period_filter(contratos, movimentos, start_date, end_date):
 # =============================================================================
 def build_cashflow(movimentos, contratos, today, n_future=6):
     mo = movimentos.copy()
+    # Garantir que dtvenc seja datetime
+    mo["dtvenc"] = pd.to_datetime(mo["dtvenc"], errors='coerce')
+    mo["dtrecebimento"] = pd.to_datetime(mo["dtrecebimento"], errors='coerce')
+    
     sched = (mo.dropna(subset=["dtvenc"])
              .assign(mes=lambda d: d["dtvenc"].dt.to_period("M"))
              .groupby("mes")["parcela"].sum())
@@ -296,8 +524,8 @@ def build_backlog(movimentos, today):
     if venc.empty:
         return pd.DataFrame(columns=["faixa", "valor", "parcelas"])
     venc["dias"] = venc["dias_atraso"].clip(lower=1)
-    bins = [0, 30, 60, 90, 180, 10_000_000]
-    labels = ["1-30 dias", "31-60 dias", "61-90 dias", "91-180 dias", "181+ dias"]
+    bins = [0, 30, 60, 90, 10_000_000]
+    labels = ["1-30 dias", "31-60 dias", "61-90 dias", "90+ dias"]
     venc["faixa"] = pd.cut(venc["dias"], bins=bins, labels=labels, include_lowest=True)
     return venc.groupby("faixa", observed=False).agg(
         valor=("areceber", "sum"), parcelas=("id", "count")
@@ -308,8 +536,8 @@ def compute_lgd_observada(movimentos):
     if venc.empty:
         return {label: rate for label, _, _, rate in PDD_FAIXAS_DEFAULT}
     venc["dias"] = venc["dias_atraso"].clip(lower=1)
-    bins = [0, 30, 60, 90, 180, 10_000_000]
-    labels = ["1-30 dias", "31-60 dias", "61-90 dias", "91-180 dias", "181+ dias"]
+    bins = [0, 30, 60, 90, 10_000_000]
+    labels = ["1-30 dias", "31-60 dias", "61-90 dias", "90+ dias"]
     venc["faixa"] = pd.cut(venc["dias"], bins=bins, labels=labels, include_lowest=True)
 
     cut = pd.Timestamp(date.today()) - pd.Timedelta(days=365)
@@ -367,8 +595,8 @@ def build_roll_rate(movimentos):
     mo["mes_venc"] = mo["dtvenc"].dt.to_period("M")
     mo["faixa"] = pd.cut(
         mo["dias_atraso"].clip(lower=0),
-        bins=[-1, 0, 30, 60, 90, 180, 10_000],
-        labels=["Em dia", "1-30d", "31-60d", "61-90d", "91-180d", "181+d"]
+        bins=[-1, 0, 30, 60, 90, 10_000],
+        labels=["Em dia", "1-30d", "31-60d", "61-90d", "90+d"]
     )
     pivot = mo.groupby(["idcontrato", "mes_venc"])["faixa"].first().reset_index()
     pivot = pivot.sort_values(["idcontrato", "mes_venc"])
@@ -387,8 +615,8 @@ def build_recovery_curve(movimentos):
         return pd.DataFrame(columns=["janela", "valor", "pct_acumulado"])
     paid["atraso"] = (paid["dtrecebimento"] - paid["dtvenc"]).dt.days.clip(lower=0)
     total = paid["valorrecebido"].sum()
-    janelas = [0, 3, 7, 15, 30, 60, 90, 180, 10000]
-    nomes = ["em dia (0d)", "ate 3d", "ate 7d", "ate 15d", "ate 30d", "ate 60d", "ate 90d", "ate 180d", "180+d"]
+    janelas = [0, 3, 7, 15, 30, 60, 90, 10_000]
+    nomes = ["em dia (0d)", "ate 3d", "ate 7d", "ate 15d", "ate 30d", "ate 60d", "ate 90d", "90+d"]
     rows, acc = [], 0.0
     for lo, hi, nome in zip(janelas[:-1], janelas[1:], nomes):
         v = paid[(paid["atraso"] >= lo) & (paid["atraso"] < hi)]["valorrecebido"].sum()
@@ -540,6 +768,7 @@ def build_priority_clients(movimentos):
         Parcelas_em_aberto=("id", "count"),
         Maior_atraso=("dias", "max"),
     ).sort_values(["Valor_em_aberto", "Maior_atraso"], ascending=[False, False])
+    out["Maior_atraso_exibicao"] = out["Maior_atraso"].apply(lambda x: "90+" if x > 90 else f"{int(x)}d")
     out["Prioridade"] = np.select(
         [out["Maior_atraso"] >= 90, out["Maior_atraso"] >= 60, out["Maior_atraso"] >= 30],
         ["Critica", "Alta", "Media"], default="Baixa",
@@ -547,7 +776,7 @@ def build_priority_clients(movimentos):
     return out.rename(columns={
         "Valor_em_aberto": "Valor em aberto",
         "Parcelas_em_aberto": "Parcelas em aberto",
-        "Maior_atraso": "Maior atraso",
+        "Maior_atraso_exibicao": "Maior atraso",
     })
 
 def build_action_plan_prescritivo(aberto_90, open_80_89, vencido, open_next_30, pdd, eficiencia):
@@ -621,13 +850,13 @@ def build_insights_prescritivos(agentes, backlog, eficiencia, recebido, aberto, 
                                 fpd, hhi):
     ins = []
     if recebido > 0:
-        ins.append(f"💰 **Conversao de caixa:** {eficiencia:.1%} do programado vencido foi recebido ({fmt_brl(recebido)}). "
+        ins.append(f" **Conversao de caixa:** {eficiencia:.1%} do programado vencido foi recebido ({fmt_brl(recebido)}). "
                    f"**Acao:** se eficiencia < 70%, revisar roteiro de cobranca.")
     if aberto_90 > 0:
-        ins.append(f"🚨 **Risco de perda iminente:** {fmt_brl(aberto_90)} ({aberto_90/aberto:.1%} do aberto) em 90+ dias. "
+        ins.append(f" **Risco de perda iminente:** {fmt_brl(aberto_90)} ({aberto_90/aberto:.1%} do aberto) em 90+ dias. "
                    f"**Acao:** acionar cobranca externa com desconto progressivo (30-50%).")
     if pdd > 0:
-        ins.append(f"📉 **Provisao (PDD):** {fmt_brl(pdd)} ({pdd/aberto:.1%} do aberto). "
+        ins.append(f" **Provisao (PDD):** {fmt_brl(pdd)} ({pdd/aberto:.1%} do aberto). "
                    f"**Acao:** calibrar PDD com LGD observada trimestralmente.")
     if fpd["fpd_30"] > 0.10:
         ins.append(f"⚠️ **FPD30 alto:** {fpd['fpd_30']:.1%} inadimpliram na 1a parcela. "
@@ -642,7 +871,7 @@ def build_insights_prescritivos(agentes, backlog, eficiencia, recebido, aberto, 
         ins.append(f"⚠️ **Atencao:** agente **{pior_agente}** com menor eficiencia. "
                    f"**Acao:** acompanhamento semanal.")
     if best_dow and worst_dow:
-        ins.append(f"📅 **Sazonalidade:** {best_dow} = pico; {worst_dow} = dia mais fraco. "
+        ins.append(f" **Sazonalidade:** {best_dow} = pico; {worst_dow} = dia mais fraco. "
                    f"**Acao:** concentrar cobranca ativa em {worst_dow}.")
     if contratos_novos_30d > 0:
         ins.append(f"🌱 **Origem:** {contratos_novos_30d} contratos novos nos ultimos 30 dias. "
@@ -650,10 +879,9 @@ def build_insights_prescritivos(agentes, backlog, eficiencia, recebido, aberto, 
     return ins
 
 # =============================================================================
-# FUNÇÕES DE VIABILIDADE E LUCRO (NOVAS)
+# FUNÇÕES DE VIABILIDADE E LUCRO
 # =============================================================================
 def build_monthly_profit(movimentos):
-    """Calcula o lucro real mês a mês com base no que efetivamente entrou no caixa."""
     rec = movimentos[movimentos["dtrecebimento"].notna()].copy()
     if rec.empty:
         return pd.DataFrame()
@@ -675,10 +903,7 @@ def build_monthly_profit(movimentos):
         descontos=("desconto", "sum")
     ).reset_index()
     
-    # Lucro Bruto = Juros que entraram no caixa - Descontos concedidos
     profit_df["lucro_bruto"] = profit_df["juros_recebidos"] - profit_df["descontos"]
-    
-    # Margem de Lucro sobre o Principal Recuperado
     profit_df["margem_lucro_pct"] = (
         profit_df["lucro_bruto"] / profit_df["principal_recebido"].replace(0, np.nan)
     ).fillna(0) * 100
@@ -688,7 +913,6 @@ def build_monthly_profit(movimentos):
     return profit_df
 
 def build_viability_analysis(contratos, movimentos, pdd_total):
-    """Calcula se a operação é viável comparando Lucro vs Risco (PDD) e Investimento."""
     total_investido = contratos["valor"].sum()
     total_recebido = movimentos["valorrecebido"].sum()
     total_descontos = movimentos["desconto"].sum()
@@ -702,10 +926,7 @@ def build_viability_analysis(contratos, movimentos, pdd_total):
     lucro_bruto_real = juros_recebidos - total_descontos
     roi_bruto_pct = (lucro_bruto_real / total_investido * 100) if total_investido > 0 else 0
     
-    # Lucro Líquido Ajustado ao Risco = Lucro Bruto - Perda Esperada (PDD)
     lucro_liquido_ajustado = lucro_bruto_real - pdd_total
-    
-    # Cobertura de risco: quantas vezes o lucro cobre a PDD
     cobertura_risco = lucro_bruto_real / pdd_total if pdd_total > 0 else 0
     margem_lucro_pct = (lucro_bruto_real / principal_recuperado * 100) if principal_recuperado > 0 else 0
 
@@ -1186,6 +1407,14 @@ def build_box_plot(movimentos):
 def main():
     st.set_page_config(page_title="Painel Financeiro - Microcredito", layout="wide", initial_sidebar_state="expanded")
 
+    st.sidebar.header("🎬 Modo de Demonstração")
+    
+    use_fake_data = st.sidebar.checkbox(
+        "Usar dados fictícios (Faker)", 
+        value=True,
+        help="Ative para demonstração com dados gerados aleatoriamente. Desative para usar dados reais do banco."
+    )
+    
     st.sidebar.header("Filtros")
     today = date.today()
     start_date = st.sidebar.date_input("Data inicial", value=date(today.year, 1, 1), max_value=today, key="start_date")
@@ -1193,7 +1422,19 @@ def main():
     apply_period = st.sidebar.checkbox("Aplicar filtro de periodo", value=True)
     st.sidebar.caption("Foca em contratos ativos com parcelas vencendo no periodo.")
 
-    usuarios, clientes, contratos, movimentos = load_data()
+    usuarios, clientes, contratos, movimentos = load_data(use_fake=use_fake_data)
+    
+    if usuarios is None:
+        st.error("Não foi possível carregar os dados. Verifique o banco de dados ou instale o Faker.")
+        st.stop()
+    
+    if use_fake_data and FAKER_AVAILABLE:
+        st.sidebar.success("✅ Usando dados fictícios gerados com Faker")
+    elif use_fake_data and not FAKER_AVAILABLE:
+        st.sidebar.warning("⚠️ Faker não instalado. Usando dados reais.")
+    else:
+        st.sidebar.info("📊 Usando dados reais do banco")
+    
     usuario_choices = sorted(usuarios["usuario"].dropna().unique())
     selected_users = st.sidebar.multiselect("Filtrar por agente", usuario_choices, default=usuario_choices)
 
@@ -1270,14 +1511,15 @@ def main():
         best_agente, pior_agente, best_dow, worst_dow, contratos_novos_30d, fpd, concentracao["hhi"],
     )
 
-    # Cálculos de Viabilidade e Lucro
     viab = build_viability_analysis(contratos_total, movimentos_total, pdd_total)
     monthly_profit = build_monthly_profit(movimentos_total)
 
-    st.title("Painel Financeiro - Microcredito Diario")
-    st.caption("Carteira de microcredito (90 parcelas diarias - Pix). Fonte: dbase.db. Versao com Modelos Preditivos")
+    st.title("🎬 Painel Financeiro - Microcredito Diario")
+    st.caption("Carteira de microcredito (90 parcelas diarias - Pix). Modo de demonstração com dados fictícios.")
+    
+    if use_fake_data and FAKER_AVAILABLE:
+        st.info("📊 **Modo de Demonstração:** Exibindo dados gerados aleatoriamente com Faker. Os dados são para fins de demonstração apenas.")
 
-    # Adicionada a aba 'Viabilidade & Lucro'
     tab_geral, tab_caixa, tab_risco, tab_agentes, tab_carteira, tab_controle, tab_rent, tab_viabilidade, tab_modelos, tab_viz, tab_dados = st.tabs(
         ["Visao Geral", "Fluxo de Caixa", "Risco & Cobranca", "Agentes", "Carteira", "Controle", "Rentabilidade", "Viabilidade & Lucro", "Modelos Preditivos", "Visualizacoes", "Dados"]
     )
@@ -1374,7 +1616,7 @@ def main():
         for ins in insights:
             st.markdown(f"- {ins}")
 
-        with st.expander("📖 Glossario de termos tecnicos", expanded=False):
+        with st.expander(" Glossario de termos tecnicos", expanded=False):
             for k, v in GLOSSARIO.items():
                 st.markdown(f"**{k}**: {v}")
 
@@ -1465,7 +1707,9 @@ def main():
                 figr.update_layout(height=380, showlegend=False)
                 st.plotly_chart(figr, use_container_width=True, config={"displayModeBar": False})
                 st.caption("Acumulado: " + " → ".join(
-                    [f"{r['janela']}: {r['pct_acumulado']:.1f}%" for _, r in rec_plot.iterrows()]))
+                    [f"{r['janela']}: {r['pct_acumulado']:.1f}%" for _, r in rec_plot.iterrows() 
+                     if r['janela'] in ['em dia (0d)', 'ate 30d', 'ate 60d', 'ate 90d', '90+d']]
+                ))
 
     # =========================================================================
     # TAB 3 - RISCO & COBRANCA
@@ -1483,9 +1727,9 @@ def main():
         c5.metric("FPD30", f"{fpd['fpd_30']:.1%}")
         c6.metric("FPD90", f"{fpd['fpd_90']:.1%}")
         c7.metric("HHI", f"{concentracao['hhi']:.0f}")
-        c8.metric("Recovery Rate 180d",
-                  f"{recovery.loc[recovery['janela']=='ate 180d', 'pct_acumulado'].values[0]:.1%}"
-                  if not recovery.empty and 'ate 180d' in recovery['janela'].values else "-")
+        c8.metric("Recovery Rate 90d",
+                  f"{recovery.loc[recovery['janela']=='ate 90d', 'pct_acumulado'].values[0]:.1%}"
+                  if not recovery.empty and 'ate 90d' in recovery['janela'].values else "-")
 
         if not backlog_df.empty:
             fig = px.bar(backlog_df, x="faixa", y="valor", text="valor", color="faixa",
@@ -1544,7 +1788,6 @@ def main():
         if not prio.empty:
             prio_view = prio.copy()
             prio_view["Valor em aberto"] = prio_view["Valor em aberto"].round(2)
-            prio_view["Maior atraso"] = prio_view["Maior atraso"].astype(int)
             show(prio_view.head(20))
             top10 = prio_view.head(10)
             fig = px.bar(top10, x="Cliente", y="Valor em aberto", color="Prioridade", text="Valor em aberto",
@@ -1743,7 +1986,7 @@ def main():
             st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 
     # =========================================================================
-    # TAB 8 - VIABILIDADE & LUCRO (NOVA ABA)
+    # TAB 8 - VIABILIDADE & LUCRO
     # =========================================================================
     with tab_viabilidade:
         st.subheader("💰 Viabilidade Financeira: Lucro vs Risco")
@@ -1765,7 +2008,7 @@ def main():
         c2.metric("💸 Total Recebido (Caixa)", fmt_brl(viab["total_recebido"]))
         c3.metric("🔄 Principal Recuperado", fmt_brl(viab["principal_recuperado"]),
                   help="Parte do dinheiro recebido que e devolucao do seu investimento, NAO lucro.")
-        c4.metric("📈 ROI Bruto Realizado", f"{viab['roi_bruto_pct']:.1f}%",
+        c4.metric(" ROI Bruto Realizado", f"{viab['roi_bruto_pct']:.1f}%",
                   help="Lucro bruto sobre o total investido.")
 
         c5, c6, c7, c8 = st.columns(4)
@@ -1897,7 +2140,7 @@ def main():
         if not SKLEARN_AVAILABLE:
             st.error("scikit-learn nao instalado! Instale com: pip install scikit-learn")
         else:
-            st.markdown("### 1️⃣ PD - Probability of Default")
+            st.markdown("### 1️ PD - Probability of Default")
             if st.button("🚀 Treinar Modelo PD", key="train_pd"):
                 with st.spinner("Treinando modelo..."):
                     X, y, co_features, feature_cols = prepare_features_pd(contratos_total, movimentos_total)
@@ -2047,8 +2290,8 @@ def main():
             
             st.markdown("---")
             
-            st.markdown("### 5️⃣ Prophet Forecast")
-            if st.button("🚀 Executar Prophet Forecast", key="prophet"):
+            st.markdown("### 5️ Prophet Forecast")
+            if st.button(" Executar Prophet Forecast", key="prophet"):
                 if not PROPHET_AVAILABLE:
                     st.error("Prophet nao instalado! Instale com: pip install prophet")
                 else:
@@ -2139,7 +2382,7 @@ def main():
         st.markdown("---")
         
         st.markdown("### 2️⃣ Radar Chart - Perfil de Agentes")
-        if st.button("🚀 Gerar Radar", key="radar"):
+        if st.button(" Gerar Radar", key="radar"):
             radar_data = build_radar_data(agentes)
             
             if not radar_data.empty:
