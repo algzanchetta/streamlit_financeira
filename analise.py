@@ -1402,6 +1402,439 @@ def build_box_plot(movimentos):
         return pd.DataFrame()
 
 # =============================================================================
+# RELATORIOS
+# =============================================================================
+
+def fmt_brl_rep(v):
+    try:
+        return "R$ {:,.0f}".format(float(v))
+    except Exception:
+        return "R$ 0"
+
+
+def _rep_period(ctx):
+    """Período exibido no relatório: usa o filtro quando ativo, senão o min/max dos dados."""
+    if ctx["apply_period"] and ctx["start_date"] and ctx["end_date"]:
+        return f"{ctx['start_date']} a {ctx['end_date']}"
+    datas = ctx["movimentos"]["dtvenc"].dropna()
+    if len(datas) > 0:
+        return f"{datas.min().date()} a {datas.max().date()}"
+    return f"{ctx['start_date']} a {ctx['end_date']}"
+
+
+def gerar_relatorio_visao_geral(ctx):
+    c = ctx
+    hhi = c["concentracao"]["hhi"]
+    hhi_label = "Alta" if hhi > 2500 else ("Media" if hhi > 1500 else "Baixa")
+    pct_receb = (c['recebido'] / c['programado'] * 100) if c['programado'] else 0
+    pct_90 = (c['aberto_90'] / c['aberto'] * 100) if c['aberto'] else 0
+    return f"""### 1. Visão Geral
+**Período:** {_rep_period(c)}
+
+- **Programado no periodo:** {fmt_brl_rep(c['programado'])} ({c['parcelas_vencidas']} parcelas vencíveis)
+- **Recebido no periodo:** {fmt_brl_rep(c['recebido'])} ({pct_receb:.1f}% do programado)
+- **Em aberto no periodo:** {fmt_brl_rep(c['aberto'])} ({c['parcelas_abertas']} parcelas)
+- **Vencido (backlog):** {fmt_brl_rep(c['vencido'])} | **A vencer:** {fmt_brl_rep(c['a_vencer'])}
+- **Inadimplencia 90+:** {fmt_brl_rep(c['aberto_90'])} ({pct_90:.1f}% do aberto)
+- **PDD (provisao):** {fmt_brl_rep(c['pdd'])} | **FPD30:** {c['fpd']['fpd_30']:.1%}
+- **HHI (concentracao):** {hhi:.0f} ({hhi_label})
+- **Top 10 clientes:** {c['concentracao']['top10_share']:.1%} | **Top 20:** {c['concentracao']['top20_share']:.1%}
+- **Parcelas:** {c['parcelas_vencidas']} vencidas, {c['parcelas_pagas']} pagas, {c['parcelas_abertas']} em aberto
+
+**Portfólio completo (sem filtro de periodo):**
+- **Total programado:** {fmt_brl_rep(c['programado_total'])} ({len(c['contratos_total'])} contratos)
+- **Total recebido:** {fmt_brl_rep(c['recebido_total'])} | **Total em aberto:** {fmt_brl_rep(c['aberto_total'])} | **PDD total:** {fmt_brl_rep(c['pdd_total'])}"""
+
+
+def gerar_relatorio_fluxo_caixa(ctx):
+    c = ctx
+    best_dow = c["best_dow"] if c["best_dow"] else "n/d"
+    worst_dow = c["worst_dow"] if c["worst_dow"] else "n/d"
+    rec_90 = "-"
+    if not c["recovery"].empty and "ate 90d" in c["recovery"]["janela"].values:
+        rec_90 = "{:.1%}".format(c["recovery"].loc[c["recovery"]["janela"] == "ate 90d", "pct_acumulado"].values[0])
+    return f"""### 2. Fluxo de Caixa
+**Período:** {_rep_period(c)}
+
+- **Eficiencia historica:** {c['eficiencia']:.1%}
+- **Eficiencia recente (90d):** {c['eficiencia_recente']:.1%}
+- **Recebimento por dia da semana:** melhor dia {fmt_brl_rep(c['dow']['valor'].max()) if not c['dow'].empty else '-'} ({best_dow}) | pior dia ({worst_dow})
+- **Curva de cura - recuperado ate 90 dias:** {rec_90}
+- **Projecao futura:** {len(c['cf'][c['cf']['mes'] > pd.Period(pd.Timestamp(c['today']), freq='M')])} meses projetados no cronograma"""
+
+
+def gerar_relatorio_risco(ctx):
+    c = ctx
+    rec_90 = "-"
+    if not c["recovery"].empty and "ate 90d" in c["recovery"]["janela"].values:
+        rec_90 = "{:.1%}".format(c["recovery"].loc[c["recovery"]["janela"] == "ate 90d", "pct_acumulado"].values[0])
+    n_prio = len(c["prio"])
+    return f"""### 3. Risco & Cobrança
+**Período:** {_rep_period(c)}
+
+- **Total vencido:** {fmt_brl_rep(c['vencido'])}
+- **PDD (provisao):** {fmt_brl_rep(c['pdd'])}
+- **Carteira liquida (aberto - PDD):** {fmt_brl_rep(c['aberto'] - c['pdd'])}
+- **Saldo critico 90+:** {fmt_brl_rep(c['aberto_90'])}
+- **FPD30:** {c['fpd']['fpd_30']:.1%} | **FPD90:** {c['fpd']['fpd_90']:.1%}
+- **HHI:** {c['concentracao']['hhi']:.0f}
+- **Recovery Rate 90d:** {rec_90}
+- **Clientes prioritarios para cobranca:** {n_prio}"""
+
+
+def gerar_relatorio_agentes(ctx):
+    c = ctx
+    if c["agentes"].empty:
+        return "### 4. Agentes\nSem dados de agentes no filtro atual."
+    total_agentes = len(c["agentes"])
+    total_recebido = c["agentes"]["Recebido (R$)"].sum()
+    total_aberto = c["agentes"]["Em aberto (R$)"].sum()
+    return f"""### 4. Agentes
+**Período:** {_rep_period(c)}
+
+- **Numero de agentes:** {total_agentes}
+- **Total recebido:** {fmt_brl_rep(total_recebido)} | **Total em aberto:** {fmt_brl_rep(total_aberto)}
+- **Melhor agente (eficiencia):** {c['best_agente'] if c['best_agente'] else '-'}
+- **Pior agente (eficiencia):** {c['pior_agente'] if c['pior_agente'] else '-'}"""
+
+
+def gerar_relatorio_carteira(ctx):
+    c = ctx
+    if c["new_ct"] is None or c["new_ct"].empty:
+        novos = 0
+        ticket = 0
+    else:
+        novos = len(c["new_ct"])
+        ticket = c["new_ct"]["valor"].mean()
+    n_seg = len(c["seg"]) if c["seg"] is not None else 0
+    return f"""### 5. Carteira
+**Período:** {_rep_period(c)}
+
+- **Contratos no periodo:** {novos}
+- **Ticket medio:** {fmt_brl_rep(ticket)}
+- **Segmentos (estabelecimento) analisados:** {n_seg}"""
+
+
+def gerar_relatorio_controle(ctx):
+    c = ctx
+    n_excl = len(c["contratos_excluidos"])
+    val_excl = c["contratos_excluidos"]["valor"].sum() if n_excl > 0 else 0
+    return f"""### 6. Controle
+**Período:** {_rep_period(c)}
+
+- **Total contratos (validos):** {len(c['contratos_total'])}
+- **Principal total (portfolio):** {fmt_brl_rep(c['principal_total'])}
+- **Principal no periodo:** {fmt_brl_rep(c['principal'])}
+- **Contratos excluidos:** {n_excl} (valor {fmt_brl_rep(val_excl)})"""
+
+
+def gerar_relatorio_rentabilidade(ctx):
+    c = ctx
+    retorno = (c['recebido'] / c['principal'] * 100) if c['principal'] else 0
+    ticket = c["contratos_total"]["valor"].mean() if len(c["contratos_total"]) else 0
+    return f"""### 7. Rentabilidade
+**Período:** {_rep_period(c)}
+
+- **Principal:** {fmt_brl_rep(c['principal'])}
+- **Juros previstos:** {fmt_brl_rep(c['juros_previstos'])}
+- **Juros realizados (caixa):** {fmt_brl_rep(c['juros_realizados'])}
+- **Descontos concedidos:** {fmt_brl_rep(c['desconto_total'])}
+- **Retorno realizado:** {retorno:.1f}%
+- **Ticket medio:** {fmt_brl_rep(ticket)}"""
+
+
+def gerar_relatorio_viabilidade(ctx):
+    c = ctx
+    v = c["viab"]
+    if v.get("lucro_liquido_ajustado", 0) > 0 or v.get("lucro_bruto_real", 0) > 0:
+        status = "VIÁVEL e SAUDÁVEL" if v.get("cobertura_risco", 0) >= 2 else ("VIÁVEL, porém apertado" if v.get("cobertura_risco", 0) >= 1 else "LUCRO CONTÁBIL, insuficiente para o risco")
+    else:
+        status = "EM PREJUÍZO CONTÁBIL"
+    return f"""### 8. Viabilidade & Lucro
+**Período:** {_rep_period(c)}
+
+- **Total investido (principal):** {fmt_brl_rep(v.get('total_investido', 0))}
+- **Total recebido (caixa):** {fmt_brl_rep(v.get('total_recebido', 0))}
+- **Principal recuperado:** {fmt_brl_rep(v.get('principal_recuperado', 0))}
+- **Juros recebidos:** {fmt_brl_rep(v.get('juros_recebidos', 0))}
+- **Descontos concedidos:** {fmt_brl_rep(v.get('descontos', 0))}
+- **Lucro bruto real:** {fmt_brl_rep(v.get('lucro_bruto_real', 0))}
+- **Margem de lucro:** {v.get('margem_lucro_pct', 0):.1f}%
+- **ROI bruto realizado:** {v.get('roi_bruto_pct', 0):.1f}%
+- **Cobertura do risco:** {v.get('cobertura_risco', 0):.1f}x
+- **Lucro liquido ajustado ao risco:** {fmt_brl_rep(v.get('lucro_liquido_ajustado', 0))}
+- **PDD / Total investido:** {v.get('pdd_total', 0)/v.get('total_investido', 0)*100 if v.get('total_investido', 0) else 0:.1f}%
+- **Status da operacao:** {status}"""
+
+
+def gerar_conclusao_geral(ctx):
+    """Resumo executivo consolidado de todas as análises das páginas."""
+    c = ctx
+    v = c["viab"]
+    hhi_int = int(round(float(c["concentracao"]["hhi"])))
+    hhi_label = "ALTA" if hhi_int > 2500 else ("MEDIA" if hhi_int > 1500 else "BAIXA")
+    pct_90 = (c["aberto_90"] / c["aberto"] * 100) if c["aberto"] else 0
+    pct_vencido = (c["vencido"] / c["aberto"] * 100) if c["aberto"] else 0
+    pdd_pct_aberto = (c["pdd"] / c["aberto"] * 100) if c["aberto"] else 0
+    cobertura = v.get("cobertura_risco", 0)
+    lucro = v.get("lucro_bruto_real", 0)
+    lucro_liq = v.get("lucro_liquido_ajustado", 0)
+    roi_aj = (lucro_liq / v.get("total_investido", 0) * 100) if v.get("total_investido", 0) else 0
+
+    # ---- Veredito ----------------------------------------------------------
+    if lucro > 0 and cobertura >= 2.0:
+        saude_titulo = "A operação é VIÁVEL e SAUDÁVEL."
+        saude_txt = (f"A rentabilidade cobre com folga o risco: o lucro bruto de {fmt_brl_rep(lucro)} "
+                     f"representa {cobertura:.1f}x a PDD ({fmt_brl_rep(v.get('pdd_total', 0))}), gerando lucro líquido "
+                     f"ajustado ao risco positivo de {fmt_brl_rep(lucro_liq)}.")
+    elif lucro > 0 and cobertura >= 1.0:
+        saude_titulo = "A operação é VIÁVEL, MAS COM MARGEM APERTADA."
+        saude_txt = (f"A rentabilidade nominal é alta, mas o saldo em atraso consome boa parte do lucro: o bruto de "
+                     f"{fmt_brl_rep(lucro)} cobre apenas {cobertura:.1f}x a PDD ({fmt_brl_rep(v.get('pdd_total', 0))}), "
+                     f"reduzindo o lucro líquido ajustado ao risco para {fmt_brl_rep(lucro_liq)}.")
+    elif lucro > 0:
+        saude_titulo = "A operação tem LUCRO CONTÁBIL, mas INSUFICIENTE para o risco."
+        saude_txt = (f"O lucro bruto ({fmt_brl_rep(lucro)}) é positivo, porém menor que a PDD "
+                     f"({fmt_brl_rep(v.get('pdd_total', 0))}), deixando o lucro líquido ajustado negativo "
+                     f"({fmt_brl_rep(lucro_liq)}).")
+    else:
+        saude_titulo = "A operação está EM PREJUÍZO CONTÁBIL."
+        saude_txt = (f"O lucro bruto já é negativo ({fmt_brl_rep(lucro)}). Ação imediata de contenção de risco "
+                     f"e cobrança é necessária.")
+
+    # ---- Backlog por faixa -------------------------------------------------
+    backlog_txt = "-"
+    if not c["backlog_df"].empty:
+        bf = c["backlog_df"]
+        partes_backlog = [f"{r['faixa']} {fmt_brl_rep(r['valor'])}" for _, r in bf.iterrows()]
+        backlog_txt = " | ".join(partes_backlog)
+
+    # ---- KPI: PDD por faixa (maior concentração de provisão) ---------------
+    maior_pdd_faixa = "-"
+    if not c["pdd_df"].empty:
+        pddf = c["pdd_df"].sort_values("PDD", ascending=False)
+        top = pddf.iloc[0]
+        maior_pdd_faixa = f"{top['Faixa']} ({fmt_brl_rep(top['PDD'])})"
+
+    # ---- Recovery rate 90 dias ---------------------------------------------
+    rec_90 = "-"
+    if not c["recovery"].empty and "ate 90d" in c["recovery"]["janela"].values:
+        rec_90 = "{:.1%}".format(c["recovery"].loc[c["recovery"]["janela"] == "ate 90d", "pct_acumulado"].values[0])
+
+    # ---- Roll rate (persistência do 90+) -----------------------------------
+    roll_90_txt = "-"
+    if not c["roll_rate"].empty:
+        rr = c["roll_rate"]
+        prox = rr[rr["faixa"] == "90+d"]
+        if not prox.empty:
+            stay = prox[prox["faixa_next"] == "90+d"]
+            if not stay.empty:
+                roll_90_txt = "{:.1%}".format(stay["pct"].values[0])
+
+    # ---- Projeção 30 dias --------------------------------------------------
+    proj_30_txt = "-"
+    try:
+        fut30 = pd.Timestamp(c["today"]) + pd.Timedelta(days=30)
+        sel = c["movimentos"][c["movimentos"]["a_vencer"] & (c["movimentos"]["dtvenc"] <= fut30)]
+        proj_30_txt = fmt_brl_rep(sel["areceber"].sum())
+    except Exception:
+        proj_30_txt = "-"
+
+    # ---- Eficiência --------------------------------------------------------
+    pct_receb = (c["recebido"] / c["programado"] * 100) if c["programado"] else 0
+    if c["eficiencia_recente"] >= 0.80:
+        cob_qual = "Boa"
+    elif c["eficiencia_recente"] >= 0.60:
+        cob_qual = "Moderada"
+    else:
+        cob_qual = "Fraca"
+
+    # ---- Concentração ------------------------------------------------------
+    if hhi_int > 2500 or c["concentracao"]["top10_share"] > 0.50:
+        conc_qual = "ELEVADA"
+    elif hhi_int > 1500 or c["concentracao"]["top10_share"] > 0.35:
+        conc_qual = "MÉDIA"
+    else:
+        conc_qual = "BAIXA"
+
+    # ---- Agentes -----------------------------------------------------------
+    agt_txt = "-"
+    if not c["agentes"].empty:
+        ag = c["agentes"].sort_values("Eficiencia %", ascending=False)
+        pior_ag = ag.iloc[-1]
+        maior_aberto = ag.sort_values("Em aberto (R$)", ascending=False).iloc[0]
+        ag_top_txt = ", ".join(f"{r['Agente']} ({r['Eficiencia %']:.1%})" for _, r in ag.head(2).iterrows())
+        agt_txt = (f"Maiores eficiências: {ag_top_txt}. Menor: {pior_ag['Agente']} ({pior_ag['Eficiencia %']:.1%}). "
+                   f"Maior saldo aberto: {maior_aberto['Agente']} ({fmt_brl_rep(maior_aberto['Em aberto (R$)'])} "
+                   f"com eficiência de {maior_aberto['Eficiencia %']:.1%}).")
+
+    # ---- Segmentos ---------------------------------------------------------
+    seg_top_txt = "-"
+    seg_crit_txt = "-"
+    if c["seg"] is not None and not c["seg"].empty and c["seg"]["Eficiencia %"].notna().any():
+        seg_ok = c["seg"][c["seg"]["Eficiencia %"].notna()].copy()
+        seg_ok = seg_ok[seg_ok["Recebido"] + seg_ok["Em_aberto"] > 0]
+        if not seg_ok.empty:
+            top_seg = seg_ok.sort_values("Eficiencia %", ascending=False).head(2)
+            crit_seg = seg_ok.sort_values("Eficiencia %", ascending=True).head(2)
+            seg_top_txt = ", ".join(f"{r['Segmento']} ({r['Eficiencia %']:.1%})" for _, r in top_seg.iterrows())
+            seg_crit_txt = ", ".join(f"{r['Segmento']} ({r['Eficiencia %']:.1%})" for _, r in crit_seg.iterrows())
+
+    # ---- KPI table ---------------------------------------------------------
+    ticket = c["contratos_total"]["valor"].mean() if len(c["contratos_total"]) else 0
+    kpi_rows = [
+        ("Lucro Bruto Real", fmt_brl_rep(lucro), "Lucro acumulado sem deduzir provisão"),
+        ("Lucro Líquido Ajustado ao Risco", fmt_brl_rep(lucro_liq),
+         f"Lucro após deduzir a PDD ({fmt_brl_rep(v.get('pdd_total', 0))})"),
+        ("Cobertura do Risco", f"{cobertura:.1f}x",
+         "Margem de cobertura para perdas (ideal ≥ 2x)"),
+        ("Inadimplência Crítica (90+ dias)", fmt_brl_rep(c["aberto_90"]),
+         f"{pct_90:.1f}% do saldo em aberto"),
+        ("ROI Ajustado ao Risco", f"{roi_aj:.1f}%",
+         "Retorno líquido real em relação ao investimento"),
+        ("Eficiência de Cobrança (90d)", f"{c['eficiencia_recente']:.1%}",
+         f"Qualidade {cob_qual}; histórica {c['eficiencia']:.1%}"),
+    ]
+    kpi_tabela = "| Indicador (KPI) | Valor Atual | Status / Impacto |\n|---|---|---|\n"
+    kpi_tabela += "\n".join(f"| {a} | {b} | {d} |" for a, b, d in kpi_rows)
+
+    # ---- Fortes / Riscos ---------------------------------------------------
+    pontos_fortes = [
+        f"Modelo gera lucro bruto significativo ({fmt_brl_rep(lucro)}) e cobre {cobertura:.1f}x o risco de perda estimado.",
+        f"Eficiência de cobrança recente é {cob_qual.lower()} ({c['eficiencia_recente']:.1%}) e a inadimplência inicial "
+        f"(FPD30) está em {c['fpd']['fpd_30']:.1%} — controlada na origem.",
+        f"Concentração de risco {conc_qual.lower()} (HHI = {hhi_int}; Top 10 = {c['concentracao']['top10_share']:.1%}).",
+    ]
+    riscos_imediatos = [
+        f"Estoque vencido 90+ de {fmt_brl_rep(c['aberto_90'])} ({pct_90:.1f}% do aberto) é o maior fator de risco, "
+        f"consumindo a maior parte da provisão.",
+        f"PDD de {fmt_brl_rep(c['pdd'])} equivale a {pdd_pct_aberto:.1f}% do saldo em aberto; maior provisão em {maior_pdd_faixa}.",
+    ]
+    if c["roll_rate"].empty:
+        riscos_imediatos.append("Sem histórico suficiente de Roll Rate para avaliar a persistência das faixas de atraso.")
+    else:
+        riscos_imediatos.append(f"Roll Rate indica que {roll_90_txt} do saldo 90+d permanece na faixa crítica, "
+                                f"confirmando dificuldade de recuperação.")
+    if not c["agentes"].empty and (c["agentes"]["Eficiencia %"] < 0.20).any():
+        piores = c["agentes"][c["agentes"]["Eficiencia %"] < 0.20]["Agente"].tolist()
+        riscos_imediatos.append(f"Forte desigualdade de performance entre agentes ({', '.join(piores)} com eficiência < 20%), "
+                                f"comprometendo a saúde da carteira.")
+    if lucro_liq < 0:
+        riscos_imediatos.append(f"A margem líquida ajustada ao risco é negativa ({fmt_brl_rep(lucro_liq)}), tornando a operação "
+                                f"sensível a qualquer aumento de inadimplência ou desconto.")
+
+    # ---- Recomendações -----------------------------------------------------
+    rec_lista = []
+    rec_lista.append(f"**Prioridade Crítica:** acionar cobrança externa e negociar com desconto progressivo para recuperar "
+                     f"parte dos {fmt_brl_rep(c['aberto_90'])} em atraso 90+.")
+    rec_lista.append("**Reforçar cobrança preventiva** nos atrasos 61-90 dias para evitar migração para a faixa crítica.")
+    if not c["agentes"].empty and (c["agentes"]["Eficiencia %"] < 0.20).any():
+        baixos = c["agentes"][c["agentes"]["Eficiencia %"] < 0.20]["Agente"].tolist()
+        rec_lista.append(f"**Revisar performance dos agentes** ({', '.join(baixos)}): investigar causas, treinar ou realocar carteira.")
+    elif c["best_agente"]:
+        rec_lista.append(f"**Espalhar boas práticas** do melhor agente ({c['best_agente']}) para elevar a eficiência dos demais.")
+    if seg_crit_txt != "-":
+        rec_lista.append(f"**Focar em segmentos rentáveis** (ex.: {seg_top_txt}) e revisar política de crédito para segmentos críticos ({seg_crit_txt}).")
+    if cobertura < 2.0:
+        rec_lista.append("**Ampliar o colchão de margem:** revisar pricing/taxas e política de descontos até a cobertura do risco chegar a ≥ 2x.")
+
+    # ---- Montagem final ----------------------------------------------------
+    return f"""## Resumo Executivo
+
+**{saude_titulo}** {saude_txt}
+
+**Volume de Operações:** {fmt_brl_rep(c['principal_total'])} em {len(c['contratos_total'])} contratos, com ticket médio de {fmt_brl_rep(ticket)}.
+
+**Arrecadação e Retorno:** Total de {fmt_brl_rep(c['recebido_total'])} recebidos em caixa ({pct_receb:.1f}% do programado), gerando um Lucro Bruto Real de {fmt_brl_rep(lucro)} e ROI Bruto de {v.get('roi_bruto_pct', 0):.1f}%.
+
+**Perfil de Inadimplência:** Saldo em aberto de {fmt_brl_rep(c['aberto'])}, com {fmt_brl_rep(c['vencido'])} vencido (backlog, {pct_vencido:.1f}% do aberto) e {fmt_brl_rep(c['aberto_90'])} concentrados no prazo crítico de 90+ dias ({pct_90:.1f}% do saldo aberto).
+
+**Provisão de Risco (PDD):** Provisão acumulada em {fmt_brl_rep(c['pdd'])} ({pdd_pct_aberto:.1f}% do saldo aberto).
+
+**Concentração e Performance:** O índice HHI indica concentração **{hhi_label}** ({hhi_int}), com Top 10 de clientes representando {c['concentracao']['top10_share']:.1%} do total em aberto (Top 20 = {c['concentracao']['top20_share']:.1%}). {agt_txt}
+
+{kpi_tabela}
+
+## Análise Detalhada
+
+### 1. Desempenho Geral da Carteira
+- **Portfólio:** {len(c['contratos_total'])} contratos, principal total de {fmt_brl_rep(c['principal_total'])}.
+- **Recebimento Total:** {fmt_brl_rep(c['recebido_total'])}, representando {pct_receb:.1f}% do programado ({fmt_brl_rep(c['programado_total'])}).
+- **Saldo em Aberto:** {fmt_brl_rep(c['aberto'])}, com destaque para **vencido (backlog)** de {fmt_brl_rep(c['vencido'])} ({pct_vencido:.1f}% do aberto).
+- **Inadimplência Crítica:** {fmt_brl_rep(c['aberto_90'])} em atraso superior a 90 dias ({pct_90:.1f}% do aberto).
+
+### 2. Eficiência de Cobrança e Fluxo de Caixa
+- **Eficiência histórica:** {c['eficiencia']:.1%}; nos últimos 90 dias: {c['eficiencia_recente']:.1%}.
+- **Projeção 30 dias:** recebimentos previstos de {proj_30_txt} nas próximas 30 dias.
+- **Backlog por faixa de atraso:** {backlog_txt}.
+- **Curva de cura:** recuperação acumulada em até 90 dias de {rec_90}.
+
+### 3. Risco e Provisão (PDD)
+- **PDD (Provisão para Devedores Duvidosos):** {fmt_brl_rep(c['pdd'])}, representando {pdd_pct_aberto:.1f}% do saldo em aberto.
+- **Carteira líquida (aberto - PDD):** {fmt_brl_rep(c['aberto'] - c['pdd'])}.
+- **FPD30:** {c['fpd']['fpd_30']:.1%} — inadimplência inicial {('controlada' if c['fpd']['fpd_30'] < 0.10 else 'elevada')}, mas o estoque antigo é alto.
+- **Roll Rate:** a persistência do saldo 90+d na faixa crítica é de {roll_90_txt}.
+
+### 4. Concentração e Performance por Agente
+- **HHI (Índice de Herfindahl-Hirschman):** {hhi_int} — concentração **{conc_qual}** de risco.
+- **Top 10 clientes:** {c['concentracao']['top10_share']:.1%} do saldo em aberto; **Top 20:** {c['concentracao']['top20_share']:.1%}.
+- **Performance por agente:** {agt_txt}.
+
+### 5. Segmentação e Rentabilidade
+- **Segmentos com melhor eficiência:** {seg_top_txt}.
+- **Segmentos críticos:** {seg_crit_txt}.
+- **Lucro Bruto Realizado:** {fmt_brl_rep(lucro)}, com margem de {v.get('margem_lucro_pct', 0):.1f}% sobre o principal recuperado.
+- **Ajustado pelo risco (PDD):** lucro líquido de {fmt_brl_rep(lucro_liq)}, com ROI ajustado ao risco de {roi_aj:.1f}%.
+
+## Conclusão
+
+{saude_titulo} {saude_txt}
+
+## Pontos Fortes
+{chr(10).join('• ' + p for p in pontos_fortes)}
+
+## Riscos Imediatos
+{chr(10).join('• ' + p for p in riscos_imediatos)}
+
+## Recomendações Estratégicas
+{chr(10).join('• ' + p for p in rec_lista)}"""
+
+
+def gerar_relatorio_geral(ctx, paginas_selecionadas):
+    geradores = {
+        "Visao Geral": gerar_relatorio_visao_geral,
+        "Fluxo de Caixa": gerar_relatorio_fluxo_caixa,
+        "Risco & Cobranca": gerar_relatorio_risco,
+        "Agentes": gerar_relatorio_agentes,
+        "Carteira": gerar_relatorio_carteira,
+        "Controle": gerar_relatorio_controle,
+        "Rentabilidade": gerar_relatorio_rentabilidade,
+        "Viabilidade & Lucro": gerar_relatorio_viabilidade,
+    }
+    try:
+        data_gerado = ctx["hoje"].strftime("%d/%m/%Y")
+    except Exception:
+        data_gerado = str(ctx["today"])
+    partes = [f"# RELATÓRIO DA ANÁLISE FINANCEIRA\nGerado em {data_gerado} | Período: {_rep_period(ctx)}"]
+    if paginas_selecionadas:
+        fatias = [g for k, g in geradores.items() if k in paginas_selecionadas]
+        incluir_conclusao = False
+    else:
+        fatias = list(geradores.values())
+        incluir_conclusao = True
+    for g in fatias:
+        try:
+            partes.append(g(ctx))
+        except Exception as e:
+            partes.append(f"(erro ao gerar seção {getattr(g, '__name__', '')}: {e})")
+    if incluir_conclusao:
+        try:
+            partes.append(gerar_conclusao_geral(ctx))
+        except Exception as e:
+            partes.append(f"(erro ao gerar conclusão: {e})")
+    return "\n\n".join(partes)
+
+# =============================================================================
 # MAIN
 # =============================================================================
 def main():
@@ -1514,6 +1947,79 @@ def main():
     viab = build_viability_analysis(contratos_total, movimentos_total, pdd_total)
     monthly_profit = build_monthly_profit(movimentos_total)
 
+    # ---- Dados auxiliares para o relatório ---------------------------------
+    new_ct = contratos[contratos["dtinicio"].notna()].copy()
+    if apply_period and start_date and end_date:
+        period_start_ts = pd.Timestamp(start_date)
+        period_end_ts = pd.Timestamp(end_date) + pd.Timedelta(days=1)
+        new_ct = new_ct[(new_ct["dtinicio"] >= period_start_ts) & (new_ct["dtinicio"] < period_end_ts)].copy()
+
+    seg = movimentos.groupby("nome_estabelecimento_norm").agg(
+        Recebido=("valorrecebido", "sum"),
+        Em_aberto=("areceber", lambda s: s[movimentos.loc[s.index, "status_pago"] == False].sum()),
+        Clientes=("idcliente", "nunique"),
+    ).reset_index().rename(columns={"nome_estabelecimento_norm": "Segmento"})
+    seg["Total"] = seg["Recebido"] + seg["Em_aberto"]
+    seg["Eficiencia %"] = seg["Recebido"] / seg["Total"].replace(0, np.nan)
+    seg = seg.sort_values("Total", ascending=False)
+    prio = build_priority_clients(movimentos)
+
+    ctx = {
+        "today": today,
+        "hoje": hoje_ts,
+        "apply_period": apply_period,
+        "start_date": start_date,
+        "end_date": end_date,
+        "movimentos": movimentos,
+        "movimentos_total": movimentos_total,
+        "contratos": contratos,
+        "contratos_total": contratos_total,
+        "contratos_excluidos": contratos_excluidos,
+        "programado": programado, "recebido": recebido, "aberto": aberto,
+        "vencido": vencido, "a_vencer": a_vencer, "aberto_90": aberto_90,
+        "aberto_80_89": aberto_80_89, "open_next_30": open_next_30,
+        "parcelas_vencidas": parcelas_vencidas, "parcelas_pagas": parcelas_pagas,
+        "parcelas_abertas": parcelas_abertas,
+        "programado_total": programado_total, "recebido_total": recebido_total,
+        "aberto_total": aberto_total, "principal": principal, "principal_total": principal_total,
+        "juros_previstos": juros_previstos, "juros_realizados": juros_realizados,
+        "desconto_total": desconto_total, "pdd": pdd, "pdd_total": pdd_total,
+        "fpd": fpd, "concentracao": concentracao, "cf": cf,
+        "eficiencia": eficiencia, "eficiencia_recente": eficiencia_recente,
+        "recovery": recovery, "dow": dow, "agentes": agentes,
+        "best_agente": best_agente, "pior_agente": pior_agente,
+        "best_dow": best_dow, "worst_dow": worst_dow,
+        "viab": viab, "monthly_profit": monthly_profit,
+        "new_ct": new_ct, "seg": seg, "prio": prio,
+        "backlog_df": backlog_df, "pdd_df": pdd_df, "roll_rate": roll_rate,
+        "monthly_eff": monthly_eff,
+    }
+
+    # ---- Seletor e exibicao do relatorio -----------------------------------
+    scope = st.sidebar.radio(
+        "Escopo do relatório",
+        ["Geral (todas as páginas)", "Por página"],
+        key="rel_scope",
+    )
+    if scope.startswith("Por página"):
+        paginas_opcoes = ["Visao Geral", "Fluxo de Caixa", "Risco & Cobranca", "Agentes",
+                          "Carteira", "Controle", "Rentabilidade", "Viabilidade & Lucro"]
+        paginas_sel = st.sidebar.multiselect("Páginas do relatório", paginas_opcoes, default=paginas_opcoes)
+    else:
+        paginas_sel = []
+    gerar_click = st.sidebar.button("📄 Gerar relatório", use_container_width=True)
+
+    if gerar_click:
+        conteudo = gerar_relatorio_geral(ctx, paginas_sel)
+        with st.expander(f"📄 Relatorio ({'Geral' if scope.startswith('Geral') else 'Por página'})", expanded=True):
+            st.download_button(
+                "⬇️ Baixar relatório (.md)",
+                data=conteudo.encode("utf-8"),
+                file_name=f"relatorio_analise_{date.today().strftime('%Y%m%d')}.md",
+                mime="text/markdown",
+            )
+            st.markdown(conteudo)
+
     st.title("🎬 Painel Financeiro - Microcredito Diario")
     st.caption("Carteira de microcredito (90 parcelas diarias - Pix). Modo de demonstração com dados fictícios.")
     
@@ -1574,7 +2080,7 @@ def main():
         pc4.metric("PDD total", fmt_brl(pdd_total))
 
         eficiencia_periodo = recebido / programado if programado else 0
-        st.info(f"**Periodo:** {start_date} a {end_date} | "
+        st.info(f"**Periodo:** {_rep_period(ctx)} | "
                 f"**Eficiencia:** {eficiencia_periodo:.1%} | "
                 f"**Parcelas:** {parcelas_vencidas} vencidas, {parcelas_pagas} pagas, {parcelas_abertas} em aberto")
 
