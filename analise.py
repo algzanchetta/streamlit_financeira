@@ -240,39 +240,164 @@ def fmt_pct(v, digits=1):
     if pd.isna(v): return "0%"
     return f"{v*100:.{digits}f}%"
 
-def normalize_estabelecimento(name: str) -> str:
+import re
+import unicodedata
+
+
+def _normalizar_texto(texto: str) -> str:
+    """Remove acentos, coloca em maiúsculas e normaliza espaços."""
+    texto = unicodedata.normalize("NFKD", texto)
+    texto = "".join(c for c in texto if not unicodedata.combining(c))
+    texto = texto.upper()
+    texto = re.sub(r"[^A-Z0-9]+", " ", texto)
+    return re.sub(r"\s+", " ", texto).strip()
+
+
+def classificar_estabelecimento(name: str):
+    """Retorna (categoria, subcategoria) em formato claro para o estabelecimento."""
     if not isinstance(name, str) or not name.strip():
-        return "OUTROS"
-    x = name.upper()
-    patterns = [
-        ("RESTAURANT", "RESTAURANTE"), ("PIZZA", "PIZZARIA"), ("BAR", "BAR"),
-        ("PUB", "BAR"), ("PADARI", "PADARIA/PANIFICADORA"), ("PANIFICAD", "PADARIA/PANIFICADORA"),
-        ("BOULANGER", "PADARIA/PANIFICADORA"), ("LOJA", "LOJA"), ("SUPERMERC", "SUPERMERCADO"),
-        ("MERCEARIA", "MERCEARIA"), ("CAF", "CAFETERIA"), ("HOTEL", "HOTEL"),
-        ("ASSIST", "ASSISTENCIA"), ("BARBEARIA", "BARBEARIA"), ("ESPET", "ESPETINHO"),
-        ("PEIXA", "PEIXARIA"), ("VEND", "VENDEDOR"), ("FRUTARIA", "FRUTARIA"),
-        ("SALGADO", "SALGADOS"), ("SALAO", "SALAO/BELEZA"), ("BELEZA", "SALAO/BELEZA"),
-        ("UNHA", "SALAO/BELEZA"), ("CELULA", "ELETRONICOS"), ("ELETRONIC", "ELETRONICOS"),
-        ("SERRALHERIA", "SERRALHERIA"), ("MECANIC", "OFICINA/MECANICA"),
-        ("BORRACHA", "OFICINA/MECANICA"), ("LAVA", "LAVA-JATO"), ("MERCADO", "MERCADO"),
-        ("PENSAO", "PENSAO"), ("DEPOSITO", "DEPOSITO/ATACADO"), ("ATACAD", "DEPOSITO/ATACADO"),
-        ("CONSTRU", "CONSTRUCAO"), ("MATERIAL", "CONSTRUCAO"), ("MOVEL", "MOVEIS"),
-        ("ROUPA", "VESTUARIO"), ("VESTUARIO", "VESTUARIO"), ("SAPATO", "VESTUARIO"),
-        ("ACOUGUE", "ACOUGUE"), ("LANCH", "LANCHONETE"), ("ACAI", "ACAI"),
-        ("BOLO", "CONFEITARIA"), ("DOCE", "CONFEITARIA"), ("FARM", "FARMACIA"),
-        ("CABEL", "SALAO/BELEZA"), ("MOTOR", "TRANSPORTE"), ("TRANSPORT", "TRANSPORTE"),
-        ("MOTOTAXI", "TRANSPORTE"), ('DIARISTA', "DIARISTA"), ('LAVA-JATO', "LAVA-JATO"), ("PADARIA", "PADARIA/PANIFICADORA"),
+        return ("OUTROS", "OUTROS")
+
+    x = _normalizar_texto(name)
+
+    regras = [
+        ("TRANSPORTE", ["UBER", "MOTO TAXI", "MOTOTAXI", "MOTORISTA", "MOTORISTA APP", "ENTREGADOR", "DELIVERY", "VIAGEM", "ONIBUS", "LOZAMO"]),
+        ("ALIMENTAÇÃO", ["PEIXARIA", "PEIXE", "ACOUGUE", "ACOUQUE", "FRUTARIA", "VERDURAS", "QUITANDA", "SORVETERIA", "SORVETE", "ACAI", "PIZZARIA", "PIZZA", "ESPETINHO", "ESPETARIA", "PADARIA", "PANIFICADORA", "SALGADO", "SALGADOS", "CONFEITARIA", "BOLO", "DOCES", "CAFETERIA", "CAFE", "RESTAURANTE", "COMIDA", "LANCHONETE", "LANCHE", "BAR", "BUTECO", "PUB"]),
+        ("BELEZA", ["SALAO", "BELEZA", "BARBEARIA", "BARBEIRO", "UNHA", "MANICURE", "DEPIL", "BRONZE", "TATUAGEM"]),
+        ("TECNOLOGIA", ["CELULAR", "CELULARES", "INFORMATICA", "ELETRONICA", "ELETROTECNICO", "ELETRONICO"]),
+        ("AUTOMOTIVO", ["BORRACHARIA", "FUNILARIA", "LAVA JATO", "LAVAJATO", "MECANICA", "OFICINA", "MOTO", "MOTOS"]),
+        ("CONSTRUÇÃO", ["SERRALHERIA", "VIDRACARIA", "VIDROS", "REFRIGERACAO", "CLIMATIZACAO", "PEDREIRO", "OBRAS", "CONSTRUCAO", "CHAVEIRO"]),
+        ("COMÉRCIO", ["GAS", "OTICA", "OPTICA", "MERCADO", "MERCADINHO", "SUPERMERCADO", "CONVENIENCIA", "ROUPA", "MODA", "SAPATO", "CALCADOS", "SEMIJOIA", "PERFUME", "VARIEDADES", "MOVEIS", "FILTROS", "LIMPEZA"]),
+        ("HOSPEDAGEM", ["HOTEL", "PENSAO"]),
     ]
-    for token, label in patterns:
-        if token in x:
-            return label
-    first = x.split()[0] if x.split() else ""
-    valid_firsts = {"RESTAURANTE", "PIZZARIA", "PEIXARIA", "VENDEDOR", "CONVENIENCIA",
-                    "BAR", "ESPETINHO", "BARBEARIA", "PADARIA", "LOJA", "SUPERMERCADO",
-                    "CAFETERIA", "ASSISTENCIA", "HOTEL", "FRUTARIA", "SALGADOS", "LANCHONETE"}
-    if first in valid_firsts:
-        return first
-    return "OUTROS"
+
+    for categoria, tokens in regras:
+        for token in tokens:
+            if token in x:
+                if categoria == "ALIMENTAÇÃO":
+                    if "PEIXARIA" in x or "PEIXE" in x:
+                        return (categoria, "PEIXARIA")
+                    if "ACOUGUE" in x or "ACOUQUE" in x:
+                        return (categoria, "ACOUGUE/CARNES")
+                    if "FRUTARIA" in x or "VERDURAS" in x:
+                        return (categoria, "FRUTARIA/VERDURAS")
+                    if "QUITANDA" in x:
+                        return (categoria, "QUITANDA")
+                    if "SORVETERIA" in x or "SORVETE" in x:
+                        return (categoria, "SORVETERIA")
+                    if "ACAI" in x:
+                        return (categoria, "ACAI")
+                    if "PIZZARIA" in x or "PIZZA" in x:
+                        return (categoria, "PIZZARIA")
+                    if "ESPETINHO" in x or "ESPETARIA" in x or "CHURRASQUINHO" in x:
+                        return (categoria, "ESPETINHO/CHURRASQUINHO")
+                    if "PADARIA" in x or "PANIFICADORA" in x or "PANIFICACAO" in x:
+                        return (categoria, "PADARIA/PANIFICADORA")
+                    if "SALGADO" in x:
+                        return (categoria, "SALGADOS")
+                    if "CONFEITARIA" in x or "BOLO" in x or "DOCES" in x:
+                        return (categoria, "DOCES/BOLOS")
+                    if "CAFETERIA" in x or "CAFE" in x:
+                        return (categoria, "CAFETERIA/CAFE")
+                    if "RESTAURANTE" in x or "COMIDA" in x:
+                        return (categoria, "RESTAURANTE")
+                    if "LANCHONETE" in x or "LANCHE" in x:
+                        return (categoria, "LANCHONETE")
+                    if re.search(r"\bBAR\b", x) or "BUTECO" in x or "PUB" in x:
+                        return (categoria, "BAR")
+                    return (categoria, token)
+                if categoria == "BELEZA":
+                    if "SALAO" in x or "BELEZA" in x:
+                        return (categoria, "SALAO DE BELEZA")
+                    if "BARBEARIA" in x or "BARBEIRO" in x:
+                        return (categoria, "BARBEARIA")
+                    if "UNHA" in x or "MANICURE" in x:
+                        return (categoria, "MANICURE/UNHAS")
+                    if "DEPIL" in x:
+                        return (categoria, "ESTETICA/DEPILACAO")
+                    if "BRONZE" in x:
+                        return (categoria, "BRONZEAMENTO")
+                    if "TATTO" in x or "TATUAGEM" in x:
+                        return (categoria, "TATUAGEM")
+                    return (categoria, token)
+                if categoria == "TECNOLOGIA":
+                    if "CELULAR" in x or "CELULARES" in x:
+                        return (categoria, "CELULARES/ACESSORIOS")
+                    if "INFORMATICA" in x or "ELETRONICA" in x:
+                        return (categoria, "TECNOLOGIA/INFORMATICA")
+                    return (categoria, token)
+                if categoria == "AUTOMOTIVO":
+                    if "BORRACHARIA" in x:
+                        return (categoria, "BORRACHARIA")
+                    if "FUNILARIA" in x:
+                        return (categoria, "FUNILARIA/PINTURA")
+                    if "LAVA JATO" in x or "LAVAJATO" in x:
+                        return (categoria, "LAVA-JATO")
+                    if "MECANICA" in x or "OFICINA" in x:
+                        return (categoria, "OFICINA MECANICA")
+                    if "MOTO" in x or "MOTOS" in x:
+                        return (categoria, "OFICINA/MOTOS")
+                    return (categoria, token)
+                if categoria == "CONSTRUÇÃO":
+                    if "SERRALHERIA" in x:
+                        return (categoria, "SERRALHERIA")
+                    if "VIDRO" in x or "VIDRACARIA" in x:
+                        return (categoria, "VIDRACARIA")
+                    if "REFRIGERACAO" in x or "CLIMATIZACAO" in x:
+                        return (categoria, "REFRIGERACAO/CLIMATIZACAO")
+                    if "PEDREIRO" in x or "OBRAS" in x or "CONSTRUCAO" in x:
+                        return (categoria, "CONSTRUCAO/OBRAS")
+                    if "CHAVEIRO" in x:
+                        return (categoria, "CHAVEIRO")
+                    return (categoria, token)
+                if categoria == "COMÉRCIO":
+                    if "GAS" in x:
+                        return (categoria, "GAS/AGUA")
+                    if "OTICA" in x or "OPTICA" in x:
+                        return (categoria, "OTICA")
+                    if "MERCADO" in x or "MERCADINHO" in x or "SUPERMERCADO" in x:
+                        return (categoria, "MERCADO/MERCADINHO")
+                    if "CONVENIENCIA" in x:
+                        return (categoria, "CONVENIENCIA")
+                    if "ROUPA" in x or "MODA" in x:
+                        return (categoria, "VESTUARIO")
+                    if "SAPATO" in x or "CALCADOS" in x:
+                        return (categoria, "CALCADOS")
+                    if "SEMIJOIA" in x:
+                        return (categoria, "SEMIJOIAS/ACESSORIOS")
+                    if "PERFUME" in x or "COSMETICO" in x:
+                        return (categoria, "COSMETICOS/PERFUMARIA")
+                    if "VARIEDADES" in x or "NOVIDADES" in x:
+                        return (categoria, "VARIEDADES")
+                    if "MOVEIS" in x:
+                        return (categoria, "MOVEIS")
+                    if "FILTROS" in x:
+                        return (categoria, "FILTROS")
+                    if "LIMPEZA" in x:
+                        return (categoria, "MATERIAL DE LIMPEZA")
+                    return (categoria, token)
+                if categoria == "HOSPEDAGEM":
+                    if "HOTEL" in x:
+                        return (categoria, "HOTEL")
+                    if "PENSAO" in x:
+                        return (categoria, "PENSAO")
+                    return (categoria, token)
+                if categoria == "TRANSPORTE":
+                    if "MOTO TAXI" in x or "MOTOTAXI" in x or "MOTORISTA APP" in x:
+                        return (categoria, "MOTORISTA APP")
+                    if "UBER" in x or "MOTORISTA" in x:
+                        return (categoria, "TRANSPORTE")
+                    return (categoria, token)
+                return (categoria, token)
+
+    return ("OUTROS", "OUTROS")
+
+
+def normalize_estabelecimento(name: str) -> str:
+    """Compatibilidade: devolve apenas a subcategoria para o restante do sistema."""
+    _, subcategoria = classificar_estabelecimento(name)
+    return subcategoria
+
 
 def ensure_datetime(df, columns):
     """Garante que as colunas especificadas sejam datetime."""
@@ -282,7 +407,7 @@ def ensure_datetime(df, columns):
     return df
 
 # =============================================================================
-# CARREGAMENTO DE DADOS (CORRIGIDO)
+# CARREGAMENTO DE DADOS
 # =============================================================================
 @st.cache_data(ttl=60)
 def load_data(use_fake=False):
@@ -323,7 +448,7 @@ def load_data(use_fake=False):
         return None, None, None, None
     
     # =============================================================================
-    # 2. PROCESSAMENTO COMUM (SEMPRE executado, independente da origem dos dados)
+    # 2. PROCESSAMENTO COMUM
     # =============================================================================
     
     # --- Clientes ---
@@ -331,7 +456,6 @@ def load_data(use_fake=False):
     clientes["idade"] = pd.to_numeric(clientes.get("idade"), errors="coerce")
     clientes["idade"] = clientes["idade"].where(clientes["idade"] > 0, np.nan)
     clientes["genero"] = clientes.get("genero").astype(str).str.strip()
-    # Corrige o mapeamento para aceitar tanto "1"/"0" quanto "Masculino"/"Feminino"
     clientes["genero_cat"] = clientes["genero"].replace({"1": "Masculino", "0": "Feminino"}).fillna("Outro")
     
     idade_bins = [0, 18, 25, 35, 45, 55, 65, 200]
@@ -339,7 +463,12 @@ def load_data(use_fake=False):
     clientes["faixa_idade"] = pd.cut(clientes["idade"], bins=idade_bins, labels=idade_labels)
     clientes["faixa_idade"] = clientes["faixa_idade"].cat.add_categories(["Sem idade"]).fillna("Sem idade")
     clientes["avaliacao"] = clientes["avaliacao"].astype(str).fillna("Nao avaliado")
-    clientes["nome_estabelecimento"] = clientes["nome_estabelecimento"].astype(str).fillna("Desconhecido")
+    clientes["nome_estabelecimento_original"] = clientes["nome_estabelecimento"].astype(str).fillna("Desconhecido")
+    clientes["nome_estabelecimento"] = clientes["nome_estabelecimento_original"]
+    clientes[["categoria_estabelecimento", "subcategoria_estabelecimento"]] = clientes["nome_estabelecimento_original"].apply(
+        lambda v: pd.Series(classificar_estabelecimento(v))
+    )
+    clientes["nome_estabelecimento_norm"] = clientes["subcategoria_estabelecimento"]
 
     # --- Contratos ---
     contratos = ensure_datetime(contratos, ["dtinicio", "dtfim", "dtatualizacao"])
@@ -397,7 +526,6 @@ def load_data(use_fake=False):
     
     movimentos["dias_atraso"] = movimentos.apply(compute_delay, axis=1)
 
-    # >>> COLUNAS CRÍTICAS QUE ESTAVAM FALTANDO <<<
     movimentos["vencido"] = (~movimentos["status_pago"]) & movimentos["dtvenc"].notna() & (movimentos["dtvenc"] < today)
     movimentos["a_vencer"] = (~movimentos["status_pago"]) & movimentos["dtvenc"].notna() & (movimentos["dtvenc"] >= today)
     movimentos["atraso_90"] = movimentos["vencido"] & (movimentos["dias_atraso"] >= 90)
@@ -406,8 +534,12 @@ def load_data(use_fake=False):
         clientes[["id", "cliente", "genero_cat", "faixa_idade", "avaliacao", "nome_estabelecimento"]],
         left_on="idcliente", right_on="id", how="left", suffixes=("", "_cliente"),
     )
-    movimentos["nome_estabelecimento"] = movimentos["nome_estabelecimento"].fillna("Desconhecido")
-    movimentos["nome_estabelecimento_norm"] = movimentos["nome_estabelecimento"].astype(str).apply(normalize_estabelecimento)
+    movimentos["nome_estabelecimento_original"] = movimentos["nome_estabelecimento"].fillna("Desconhecido")
+    movimentos["nome_estabelecimento"] = movimentos["nome_estabelecimento_original"].astype(str)
+    movimentos[["categoria_estabelecimento", "subcategoria_estabelecimento"]] = movimentos["nome_estabelecimento_original"].apply(
+        lambda v: pd.Series(classificar_estabelecimento(v))
+    )
+    movimentos["nome_estabelecimento_norm"] = movimentos["subcategoria_estabelecimento"]
     if "usuario" in usuarios.columns:
         movimentos["usuario_nome"] = movimentos["idusuario"].map(usuarios.set_index("id")["usuario"])
 
@@ -454,18 +586,13 @@ def filter_cancelled_contracts(contratos, movimentos):
 # FUNÇÃO CORRIGIDA - apply_period_filter
 # =============================================================================
 def apply_period_filter(contratos, movimentos, start_date, end_date):
-    # Converter para Timestamp para comparação correta
     st_ts = pd.Timestamp(start_date)
     en_ts = pd.Timestamp(end_date) + pd.Timedelta(days=1)
     
-    # Garantir que a coluna dtvenc seja datetime e não tenha valores nulos
     movimentos = movimentos.copy()
     movimentos["dtvenc"] = pd.to_datetime(movimentos["dtvenc"], errors='coerce')
     
-    # Filtrar apenas linhas com dtvenc não nulo
     mask = movimentos["dtvenc"].notna()
-    
-    # Filtrar pelo período usando comparação direta com Timestamp (mais seguro)
     mask = mask & (movimentos["dtvenc"] >= st_ts) & (movimentos["dtvenc"] < en_ts)
     
     movimentos_f = movimentos[mask].copy()
@@ -477,25 +604,36 @@ def apply_period_filter(contratos, movimentos, start_date, end_date):
 # =============================================================================
 # FUNÇÕES DE ANÁLISE
 # =============================================================================
-def build_cashflow(movimentos, contratos, today, n_future=6):
+def build_cashflow(movimentos, contratos, today, n_future=6, period_start=None, period_end=None):
     mo = movimentos.copy()
-    # Garantir que dtvenc seja datetime
     mo["dtvenc"] = pd.to_datetime(mo["dtvenc"], errors='coerce')
     mo["dtrecebimento"] = pd.to_datetime(mo["dtrecebimento"], errors='coerce')
-    
-    sched = (mo.dropna(subset=["dtvenc"])
-             .assign(mes=lambda d: d["dtvenc"].dt.to_period("M"))
-             .groupby("mes")["parcela"].sum())
-    real = (mo.dropna(subset=["dtrecebimento"])
-            .assign(mes=lambda d: d["dtrecebimento"].dt.to_period("M"))
-            .groupby("mes")["valorrecebido"].sum())
-    all_meses = sorted(set(sched.index) | set(real.index))
-    if all_meses:
-        start = min(all_meses)
-        end = max(start + n_future, max(all_meses))
-        idx = pd.period_range(start, end, freq="M")
+
+    if period_start is not None and period_end is not None:
+        start_period = pd.Timestamp(period_start).to_period("M")
+        end_month_boundary = pd.Timestamp(period_end) - pd.Timedelta(days=1)
+        end_period = end_month_boundary.to_period("M")
+        sched = mo.dropna(subset=["dtvenc"]).copy()
+        sched = sched[(sched["dtvenc"] >= period_start) & (sched["dtvenc"] < period_end)]
+        sched = sched.assign(mes=lambda d: d["dtvenc"].dt.to_period("M")).groupby("mes")["parcela"].sum()
+        real = mo.dropna(subset=["dtrecebimento"]).copy()
+        real = real[(real["dtrecebimento"] >= period_start) & (real["dtrecebimento"] < period_end)]
+        real = real.assign(mes=lambda d: d["dtrecebimento"].dt.to_period("M")).groupby("mes")["valorrecebido"].sum()
+        idx = pd.period_range(start_period, end_period, freq="M")
     else:
-        idx = pd.period_range(pd.Period(today, freq="M"), periods=n_future, freq="M")
+        sched = (mo.dropna(subset=["dtvenc"])
+                 .assign(mes=lambda d: d["dtvenc"].dt.to_period("M"))
+                 .groupby("mes")["parcela"].sum())
+        real = (mo.dropna(subset=["dtrecebimento"])
+                .assign(mes=lambda d: d["dtrecebimento"].dt.to_period("M"))
+                .groupby("mes")["valorrecebido"].sum())
+        all_meses = sorted(set(sched.index) | set(real.index))
+        if all_meses:
+            start = min(all_meses)
+            end = max(start + n_future, max(all_meses))
+            idx = pd.period_range(start, end, freq="M")
+        else:
+            idx = pd.period_range(pd.Period(today, freq="M"), periods=n_future, freq="M")
     df = pd.DataFrame({"mes": idx})
     df["programado"] = df["mes"].map(sched).fillna(0)
     df["realizado"] = df["mes"].map(real).fillna(0)
@@ -635,21 +773,33 @@ def build_dow_analysis(movimentos):
     out["pct"] = out["valor"] / out["valor"].sum()
     return out[["dia", "valor", "pct", "parcelas"]]
 
-def build_monthly_return(movimentos):
+def build_monthly_return(movimentos, period_start=None, period_end=None):
     mo = movimentos.copy()
     if "juros_frac" not in mo.columns or "frac_principal" not in mo.columns:
         return pd.DataFrame()
     mo = mo[mo["dtvenc"].notna()].copy()
+    if period_start is not None and period_end is not None:
+        mo = mo[(mo["dtvenc"] >= period_start) & (mo["dtvenc"] < period_end)].copy()
     mo["mes_venc"] = mo["dtvenc"].dt.to_period("M")
+    if period_start is not None and period_end is not None:
+        start_period = pd.Timestamp(period_start).to_period("M")
+        end_month_boundary = pd.Timestamp(period_end) - pd.Timedelta(days=1)
+        end_period = end_month_boundary.to_period("M")
+        all_months = pd.period_range(start_period, end_period, freq="M")
+    else:
+        all_months = mo["mes_venc"].dropna().unique()
     g = mo.groupby("mes_venc").agg(
         programado=("parcela", "sum"),
         total_recebido=("valorrecebido", "sum"),
         parcelas=("id", "count"),
-    ).reset_index()
+    ).reindex(all_months, fill_value=0).reset_index().rename(columns={"index": "mes_venc"})
     rec = mo[mo["dtrecebimento"].notna()].copy()
+    if period_start is not None and period_end is not None:
+        rec = rec[(rec["dtrecebimento"] >= period_start) & (rec["dtrecebimento"] < period_end)].copy()
     rec["juros_rec"] = rec["valorrecebido"] * rec["juros_frac"]
     rec["princ_rec"] = rec["valorrecebido"] * rec["frac_principal"]
-    g["juros_recebidos"] = g["mes_venc"].map(rec.groupby("mes_venc")["juros_rec"].sum()).fillna(0)
+    rec_by_mes = rec.groupby("mes_venc")["juros_rec"].sum() if not rec.empty else pd.Series(dtype=float)
+    g["juros_recebidos"] = g["mes_venc"].map(rec_by_mes).fillna(0)
     g["principal_recebido"] = g["mes_venc"].map(rec.groupby("mes_venc")["princ_rec"].sum()).fillna(0)
     venc = mo[~mo["status_pago"]].copy()
     venc["juros_ab"] = venc["areceber"] * venc["juros_frac"]
@@ -661,13 +811,19 @@ def build_monthly_return(movimentos):
             "juros_recebidos", "juros_aberto", "desconto", "parcelas"]
     return g[keep]
 
-def build_monthly_efficiency(movimentos):
+def build_monthly_efficiency(movimentos, period_start=None, period_end=None):
     mo = movimentos.copy()
+    if period_start is not None and period_end is not None:
+        mo = mo[(mo["dtvenc"] >= period_start) & (mo["dtvenc"] < period_end)].copy()
     mo["mes_venc"] = mo["dtvenc"].dt.to_period("M")
-    g = (mo.dropna(subset=["mes_venc"])
-         .groupby("mes_venc")
-         .agg(programado=("parcela", "sum"), recebido=("valorrecebido", "sum"),
-              parcelas=("id", "count")).reset_index())
+    if period_start is not None and period_end is not None:
+        start_period = pd.Timestamp(period_start).to_period("M")
+        end_month_boundary = pd.Timestamp(period_end) - pd.Timedelta(days=1)
+        end_period = end_month_boundary.to_period("M")
+        all_months = pd.period_range(start_period, end_period, freq="M")
+    else:
+        all_months = mo["mes_venc"].dropna().unique()
+    g = (mo.dropna(subset=["mes_venc"]).groupby("mes_venc").agg(programado=("parcela", "sum"), recebido=("valorrecebido", "sum"), parcelas=("id", "count")).reindex(all_months, fill_value=0).reset_index().rename(columns={"index": "mes_venc"}))
     g["eficiencia"] = g["recebido"] / g["programado"].replace(0, np.nan)
     g["mes_ts"] = g["mes_venc"].dt.to_timestamp()
     g["mes_label"] = g["mes_venc"].astype(str)
@@ -878,10 +1034,16 @@ def build_insights_prescritivos(agentes, backlog, eficiencia, recebido, aberto, 
     return ins
 
 # =============================================================================
-# FUNÇÕES DE VIABILIDADE E LUCRO
+# FUNÇÕES DE VIABILIDADE E LUCRO (CORRIGIDAS)
 # =============================================================================
-def build_monthly_profit(movimentos):
+def build_monthly_profit(movimentos, period_start=None, period_end=None):
+    """Calcula o lucro mensal com base na DATA DE RECEBIMENTO."""
     rec = movimentos[movimentos["dtrecebimento"].notna()].copy()
+    
+    # IMPORTANTE: Filtrar pela data de RECEBIMENTO, não vencimento
+    if period_start is not None and period_end is not None:
+        rec = rec[(rec["dtrecebimento"] >= period_start) & (rec["dtrecebimento"] < period_end)].copy()
+    
     if rec.empty:
         return pd.DataFrame()
     
@@ -895,12 +1057,21 @@ def build_monthly_profit(movimentos):
     rec["principal_recebido"] = rec["valorrecebido"] * rec["frac_principal"]
     rec["juros_recebidos"] = rec["valorrecebido"] * rec["juros_frac"]
     
+    # Definir todos os meses do período filtrado
+    if period_start is not None and period_end is not None:
+        start_period = pd.Timestamp(period_start).to_period("M")
+        end_month_boundary = pd.Timestamp(period_end) - pd.Timedelta(days=1)
+        end_period = end_month_boundary.to_period("M")
+        all_months = pd.period_range(start_period, end_period, freq="M")
+    else:
+        all_months = rec["mes_recebimento"].unique()
+    
     profit_df = rec.groupby("mes_recebimento").agg(
         total_recebido=("valorrecebido", "sum"),
         principal_recebido=("principal_recebido", "sum"),
         juros_recebidos=("juros_recebidos", "sum"),
         descontos=("desconto", "sum")
-    ).reset_index()
+    ).reindex(all_months, fill_value=0).reset_index().rename(columns={"index": "mes_recebimento"})
     
     profit_df["lucro_bruto"] = profit_df["juros_recebidos"] - profit_df["descontos"]
     profit_df["margem_lucro_pct"] = (
@@ -911,10 +1082,17 @@ def build_monthly_profit(movimentos):
     
     return profit_df
 
-def build_viability_analysis(contratos, movimentos, pdd_total):
+def build_viability_analysis(contratos, movimentos, pdd_total, period_start=None, period_end=None):
+    """Calcula a viabilidade financeira com base na DATA DE RECEBIMENTO."""
+    mov = movimentos[movimentos["dtrecebimento"].notna()].copy()
+    
+    # Filtrar pela data de RECEBIMENTO
+    if period_start is not None and period_end is not None:
+        mov = mov[(mov["dtrecebimento"] >= period_start) & (mov["dtrecebimento"] < period_end)].copy()
+    
     total_investido = contratos["valor"].sum()
-    total_recebido = movimentos["valorrecebido"].sum()
-    total_descontos = movimentos["desconto"].sum()
+    total_recebido = mov["valorrecebido"].sum()
+    total_descontos = mov["desconto"].sum()
     
     total_a_receber_contratos = contratos["valor_parcelado"].sum()
     frac_pond = (total_investido / total_a_receber_contratos) if total_a_receber_contratos > 0 else 0
@@ -1401,11 +1579,7 @@ def build_box_plot(movimentos):
         return pd.DataFrame()
 
 def build_payment_profile(movimentos, by):
-    """Perfil de comportamento de pagamento por uma ou mais dimensões (idade, sexo, segmento...).
-
-    Retorna DataFrame com métricas por grupo: recebido, aberto, eficiência,
-    % parcelas pagas, % do aberto em 90+, atraso médio e nº de clientes.
-    """
+    """Perfil de comportamento de pagamento por uma ou mais dimensões."""
     mo = movimentos[~movimentos["dtvenc"].isna()].copy()
     g = mo.groupby(by)
     df = g.agg(
@@ -1425,9 +1599,8 @@ def build_payment_profile(movimentos, by):
     df = df.sort_values("Eficiencia %", ascending=False)
     return df
 
-
 def _grupo_label(row, label_cols):
-    """Constrói rótulo legível do grupo a partir de uma ou mais colunas."""
+    """Constrói rótulo legível do grupo."""
     if not label_cols:
         return "-"
     partes = []
@@ -1439,12 +1612,8 @@ def _grupo_label(row, label_cols):
             partes.append(str(v))
     return " + ".join(partes) if partes else "-"
 
-
 def comparar_pagadores(profile_df, label_cols):
-    """Identifica o melhor e o pior pagador de um perfil, e se são iguais/semelhantes.
-
-    Retorna (melhor_linha, pior_linha, igual, melhor_label, pior_label).
-    """
+    """Identifica o melhor e o pior pagador."""
     if profile_df is None or profile_df.empty:
         return None, None, None, None, None
     df = profile_df.copy()
@@ -1460,14 +1629,8 @@ def comparar_pagadores(profile_df, label_cols):
     p_label = _grupo_label(pior, label_cols)
     return melhor, pior, igual, m_label, p_label
 
-
 def build_coorte_recebimento(movimentos, by):
-    """Por grupo (faixa etária / sexo+idade), mede quais tendem a + RECEBIMENTO (geral)
-    e + INADIMPLÊNCIA, com contagem de contratos e clientes.
-
-    Retorna DataFrame com colunas de rótulo + Recebido_geral, Vencido, Atraso_90,
-    Inadimplencia (vencido+90+), Contratos, Clientes, Parcelas.
-    """
+    """Por grupo, mede recebimento e inadimplência."""
     mo = movimentos[~movimentos["dtvenc"].isna()].copy()
     g = mo.groupby(by)
     df = g.agg(
@@ -1490,9 +1653,8 @@ def build_coorte_recebimento(movimentos, by):
     df["Parcelas"] = df["Parcelas"].astype(int)
     return df
 
-
 def top_coorte(df, col, label_cols, n=3, descendente=True):
-    """Retorna os n grupos de maior/menor valor em uma coluna numérica do coorte."""
+    """Retorna os n grupos de maior/menor valor."""
     if df is None or df.empty or col not in df.columns:
         return []
     d = df[df[col].notna()].sort_values(col, ascending=not descendente).head(n)
@@ -1502,16 +1664,10 @@ def top_coorte(df, col, label_cols, n=3, descendente=True):
         out.append((lbl, r[col]))
     return out
 
-
 FAIXAS_VALOR_CONTRATO = [0, 1000, 2000, 3000, 4000, 5000, 1_000_000]
 
-
 def build_perfil_valor_contrato(contratos):
-    """Por FAIXA DE VALOR DE CONTRATO, mede recebimento, inadimplência e risco.
-
-    Retorna DataFrame com faixa de valor, nº contratos/clientes, valor total,
-    recebido, inadimplência (vencido/90+), default 90d e % do recebido.
-    """
+    """Por faixa de valor de contrato, mede recebimento e inadimplência."""
     cc = contratos.dropna(subset=["valor"]).copy()
     if cc.empty:
         return pd.DataFrame()
@@ -1536,13 +1692,8 @@ def build_perfil_valor_contrato(contratos):
     df = df.sort_values("Valor_total", ascending=False)
     return df
 
-
 def build_coorte_valor_contrato(contratos):
-    """Coorte por FAIXA DE VALOR DE CONTRATO no formato usado por render_coorte/top_coorte.
-
-    Colunas: Faixa Valor, Contratos, Clientes, Parcelas, Recebido_geral, Vencido,
-    Atraso_90, Inadimplencia, % Inadimplencia.
-    """
+    """Coorte por faixa de valor de contrato."""
     cc = contratos.dropna(subset=["valor"]).copy()
     if cc.empty:
         return pd.DataFrame()
@@ -1566,9 +1717,8 @@ def build_coorte_valor_contrato(contratos):
     df = df.sort_values("Recebido_geral", ascending=False)
     return df
 
-
 def perfil_cliente(contratos, idcliente):
-    """Histórico de relacionamento de um cliente: nº contratos, default, % recebido, valor médio."""
+    """Histórico de relacionamento de um cliente."""
     h = contratos[contratos["idcliente"] == idcliente]
     if h.empty:
         return {"n_contratos": 0, "default": 0, "receb_pct": None,
@@ -1581,9 +1731,8 @@ def perfil_cliente(contratos, idcliente):
         "valor_solicitado": float(h["valor"].max()),
     }
 
-
 def classificar_risco_cliente(perfil):
-    """Classifica o risco do cliente (para liberar crédito): Novo/Recorrente/Confiavel/Risco."""
+    """Classifica o risco do cliente."""
     n = perfil["n_contratos"]
     if n == 0:
         return "Novo"
@@ -1596,13 +1745,8 @@ def classificar_risco_cliente(perfil):
         return "Confiavel"
     return "Recorrente"
 
-
 def recomendar_valor_contrato(perfil, valor_solicitado=None, valor_max_teto=None):
-    """Estratégia de valor INICIAL do contrato e escalonamento conforme relacionamento.
-
-    Retorna dicionário com valor inicial sugerido, faixa de risco, e plano de
-    escalonamento (listas de [etapa, % do teto, valor, condição]).
-    """
+    """Estratégia de valor inicial do contrato."""
     risco = classificar_risco_cliente(perfil)
     solicitado = valor_solicitado if valor_solicitado is not None else perfil.get("valor_solicitado")
     base = solicitado if solicitado and solicitado > 0 else (perfil.get("valor_medio") or 0)
@@ -1611,11 +1755,10 @@ def recomendar_valor_contrato(perfil, valor_solicitado=None, valor_max_teto=None
         base = 1000.0
 
     regras = {
-        # (teto, % inicial, % de aumento por contrato pago, condição para subir a etapa)
-        "Novo":       dict(ini=0.30, passo=0.25, desc="cliente novo, sem histórico"),
-        "Risco":      dict(ini=0.25, passo=0.20, desc="histórico com inadimplência 90+"),
+        "Novo": dict(ini=0.30, passo=0.25, desc="cliente novo, sem histórico"),
+        "Risco": dict(ini=0.25, passo=0.20, desc="histórico com inadimplência 90+"),
         "Recorrente": dict(ini=0.55, passo=0.25, desc="relação recorrente, sem default"),
-        "Confiavel":  dict(ini=0.75, passo=0.25, desc="relação sólida, ≥2 contratos pagos"),
+        "Confiavel": dict(ini=0.75, passo=0.25, desc="relação sólida, ≥2 contratos pagos"),
     }
     regra = regras.get(risco, regras["Novo"])
 
@@ -1636,7 +1779,7 @@ def recomendar_valor_contrato(perfil, valor_solicitado=None, valor_max_teto=None
         plano.append({"etapa": etapa,
                       "capacidade": round(teto, 2),
                       "pct_teto": 1.0,
-                      "condicao": "consistência de longo prazo (sinais de pós-pagamento estáveis)"})
+                      "condicao": "consistência de longo prazo"})
 
     return {
         "classe": risco,
@@ -1648,10 +1791,8 @@ def recomendar_valor_contrato(perfil, valor_solicitado=None, valor_max_teto=None
         "plano": plano,
     }
 
-
 _IDADE_BINS = [0, 18, 25, 35, 45, 55, 65, 200]
 _IDADE_LABELS = ["<18", "18-25", "26-35", "36-45", "46-55", "56-65", ">65"]
-
 
 def _idade_para_faixa(idade):
     if idade is None:
@@ -1665,15 +1806,9 @@ def _idade_para_faixa(idade):
     label = pd.cut([idd], bins=_IDADE_BINS, labels=_IDADE_LABELS)[0]
     return str(label)
 
-
 def analisar_viabilidade_perfil(movimentos, contratos, genero=None, idade=None,
                                 segmento=None, valor=None):
-    """Simula a viabilidade de conceder um contrato a um perfil (sexo, idade,
-    segmento, valor), indicando a tendência à inadimplência e se é viável.
-
-    Retorna dicionário com amostra comparável, eficiência, inadimplência,
-    tendência (Baixa/Média/Alta) e veredito de viabilidade + valor inicial.
-    """
+    """Simula a viabilidade de conceder um contrato a um perfil."""
     faixa_idade = _idade_para_faixa(idade)
     mo = movimentos[~movimentos["dtvenc"].isna()].copy()
     amostra = mo.copy()
@@ -1713,13 +1848,11 @@ def analisar_viabilidade_perfil(movimentos, contratos, genero=None, idade=None,
         else:
             tendencia = "Baixa"
 
-        # risco adicional pela faixa de valor solicitada
         risco_faixa = 0.5
         if valor:
             vp = build_perfil_valor_contrato(contratos)
             if vp is not None and not vp.empty:
                 alvo = valor
-                faixa_linha = vp.iloc[[0] if vp.empty else 0]
                 for _, r in vp.iterrows():
                     if "Faixa Valor" in r.index and str(r["Faixa Valor"]).startswith("["):
                         try:
@@ -1731,13 +1864,13 @@ def analisar_viabilidade_perfil(movimentos, contratos, genero=None, idade=None,
                         except Exception:
                             continue
             if tendencia == "Alta" or risco_faixa > 0.55:
-                veredito = "Alto risco — evitar valor integral; conceder valor menor ou recusar."
+                veredito = "Alto risco — conceder valor menor ou recusar."
                 valor_inicial = (valor or 1000) * 0.25
             elif tendencia == "Média" or risco_faixa > 0.45:
-                veredito = "Viável com cautela — conceder valor reduzido e escalonar com pagamento."
+                veredito = "Viável com cautela — conceder valor reduzido."
                 valor_inicial = (valor or 1000) * 0.40
             else:
-                veredito = "Viável — perfil tende a não inadimplir; pode conceder próximo do solicitado."
+                veredito = "Viável — perfil tende a não inadimplir."
                 valor_inicial = (valor or 1000) * 0.60
         else:
             veredito = ("Perfil tende a inadimplência" if tendencia in ("Alta", "Média")
@@ -1765,7 +1898,6 @@ def analisar_viabilidade_perfil(movimentos, contratos, genero=None, idade=None,
         "valor_inicial_sugerido": valor_inicial,
     }
 
-
 # =============================================================================
 # RELATORIOS
 # =============================================================================
@@ -1776,16 +1908,14 @@ def fmt_brl_rep(v):
     except Exception:
         return "R$ 0"
 
-
 def _rep_period(ctx):
-    """Período exibido no relatório: usa o filtro quando ativo, senão o min/max dos dados."""
+    """Período exibido no relatório."""
     if ctx["apply_period"] and ctx["start_date"] and ctx["end_date"]:
         return f"{ctx['start_date']} a {ctx['end_date']}"
     datas = ctx["movimentos"]["dtvenc"].dropna()
     if len(datas) > 0:
         return f"{datas.min().date()} a {datas.max().date()}"
     return f"{ctx['start_date']} a {ctx['end_date']}"
-
 
 def gerar_relatorio_visao_geral(ctx):
     c = ctx
@@ -1810,7 +1940,6 @@ def gerar_relatorio_visao_geral(ctx):
 - **Total programado:** {fmt_brl_rep(c['programado_total'])} ({len(c['contratos_total'])} contratos)
 - **Total recebido:** {fmt_brl_rep(c['recebido_total'])} | **Total em aberto:** {fmt_brl_rep(c['aberto_total'])} | **PDD total:** {fmt_brl_rep(c['pdd_total'])}"""
 
-
 def gerar_relatorio_fluxo_caixa(ctx):
     c = ctx
     best_dow = c["best_dow"] if c["best_dow"] else "n/d"
@@ -1826,7 +1955,6 @@ def gerar_relatorio_fluxo_caixa(ctx):
 - **Recebimento por dia da semana:** melhor dia {fmt_brl_rep(c['dow']['valor'].max()) if not c['dow'].empty else '-'} ({best_dow}) | pior dia ({worst_dow})
 - **Curva de cura - recuperado ate 90 dias:** {rec_90}
 - **Projecao futura:** {len(c['cf'][c['cf']['mes'] > pd.Period(pd.Timestamp(c['today']), freq='M')])} meses projetados no cronograma"""
-
 
 def gerar_relatorio_risco(ctx):
     c = ctx
@@ -1846,7 +1974,6 @@ def gerar_relatorio_risco(ctx):
 - **Recovery Rate 90d:** {rec_90}
 - **Clientes prioritarios para cobranca:** {n_prio}"""
 
-
 def gerar_relatorio_agentes(ctx):
     c = ctx
     if c["agentes"].empty:
@@ -1861,7 +1988,6 @@ def gerar_relatorio_agentes(ctx):
 - **Total recebido:** {fmt_brl_rep(total_recebido)} | **Total em aberto:** {fmt_brl_rep(total_aberto)}
 - **Melhor agente (eficiencia):** {c['best_agente'] if c['best_agente'] else '-'}
 - **Pior agente (eficiencia):** {c['pior_agente'] if c['pior_agente'] else '-'}"""
-
 
 def gerar_relatorio_carteira(ctx):
     c = ctx
@@ -1879,7 +2005,6 @@ def gerar_relatorio_carteira(ctx):
 - **Ticket medio:** {fmt_brl_rep(ticket)}
 - **Segmentos (estabelecimento) analisados:** {n_seg}"""
 
-
 def gerar_relatorio_controle(ctx):
     c = ctx
     n_excl = len(c["contratos_excluidos"])
@@ -1891,7 +2016,6 @@ def gerar_relatorio_controle(ctx):
 - **Principal total (portfolio):** {fmt_brl_rep(c['principal_total'])}
 - **Principal no periodo:** {fmt_brl_rep(c['principal'])}
 - **Contratos excluidos:** {n_excl} (valor {fmt_brl_rep(val_excl)})"""
-
 
 def gerar_relatorio_rentabilidade(ctx):
     c = ctx
@@ -1906,7 +2030,6 @@ def gerar_relatorio_rentabilidade(ctx):
 - **Descontos concedidos:** {fmt_brl_rep(c['desconto_total'])}
 - **Retorno realizado:** {retorno:.1f}%
 - **Ticket medio:** {fmt_brl_rep(ticket)}"""
-
 
 def gerar_relatorio_viabilidade(ctx):
     c = ctx
@@ -1931,9 +2054,8 @@ def gerar_relatorio_viabilidade(ctx):
 - **PDD / Total investido:** {v.get('pdd_total', 0)/v.get('total_investido', 0)*100 if v.get('total_investido', 0) else 0:.1f}%
 - **Status da operacao:** {status}"""
 
-
 def gerar_conclusao_geral(ctx):
-    """Resumo executivo consolidado de todas as análises das páginas."""
+    """Resumo executivo consolidado."""
     c = ctx
     v = c["viab"]
     hhi_int = int(round(float(c["concentracao"]["hhi"])))
@@ -1946,7 +2068,6 @@ def gerar_conclusao_geral(ctx):
     lucro_liq = v.get("lucro_liquido_ajustado", 0)
     roi_aj = (lucro_liq / v.get("total_investido", 0) * 100) if v.get("total_investido", 0) else 0
 
-    # ---- Veredito ----------------------------------------------------------
     if lucro > 0 and cobertura >= 2.0:
         saude_titulo = "A operação é VIÁVEL e SAUDÁVEL."
         saude_txt = (f"A rentabilidade cobre com folga o risco: o lucro bruto de {fmt_brl_rep(lucro)} "
@@ -1967,26 +2088,22 @@ def gerar_conclusao_geral(ctx):
         saude_txt = (f"O lucro bruto já é negativo ({fmt_brl_rep(lucro)}). Ação imediata de contenção de risco "
                      f"e cobrança é necessária.")
 
-    # ---- Backlog por faixa -------------------------------------------------
     backlog_txt = "-"
     if not c["backlog_df"].empty:
         bf = c["backlog_df"]
         partes_backlog = [f"{r['faixa']} {fmt_brl_rep(r['valor'])}" for _, r in bf.iterrows()]
         backlog_txt = " | ".join(partes_backlog)
 
-    # ---- KPI: PDD por faixa (maior concentração de provisão) ---------------
     maior_pdd_faixa = "-"
     if not c["pdd_df"].empty:
         pddf = c["pdd_df"].sort_values("PDD", ascending=False)
         top = pddf.iloc[0]
         maior_pdd_faixa = f"{top['Faixa']} ({fmt_brl_rep(top['PDD'])})"
 
-    # ---- Recovery rate 90 dias ---------------------------------------------
     rec_90 = "-"
     if not c["recovery"].empty and "ate 90d" in c["recovery"]["janela"].values:
         rec_90 = "{:.1%}".format(c["recovery"].loc[c["recovery"]["janela"] == "ate 90d", "pct_acumulado"].values[0])
 
-    # ---- Roll rate (persistência do 90+) -----------------------------------
     roll_90_txt = "-"
     if not c["roll_rate"].empty:
         rr = c["roll_rate"]
@@ -1996,7 +2113,6 @@ def gerar_conclusao_geral(ctx):
             if not stay.empty:
                 roll_90_txt = "{:.1%}".format(stay["pct"].values[0])
 
-    # ---- Projeção 30 dias --------------------------------------------------
     proj_30_txt = "-"
     try:
         fut30 = pd.Timestamp(c["today"]) + pd.Timedelta(days=30)
@@ -2005,7 +2121,6 @@ def gerar_conclusao_geral(ctx):
     except Exception:
         proj_30_txt = "-"
 
-    # ---- Eficiência --------------------------------------------------------
     pct_receb = (c["recebido"] / c["programado"] * 100) if c["programado"] else 0
     if c["eficiencia_recente"] >= 0.80:
         cob_qual = "Boa"
@@ -2014,7 +2129,6 @@ def gerar_conclusao_geral(ctx):
     else:
         cob_qual = "Fraca"
 
-    # ---- Concentração ------------------------------------------------------
     if hhi_int > 2500 or c["concentracao"]["top10_share"] > 0.50:
         conc_qual = "ELEVADA"
     elif hhi_int > 1500 or c["concentracao"]["top10_share"] > 0.35:
@@ -2022,7 +2136,6 @@ def gerar_conclusao_geral(ctx):
     else:
         conc_qual = "BAIXA"
 
-    # ---- Agentes -----------------------------------------------------------
     agt_txt = "-"
     if not c["agentes"].empty:
         ag = c["agentes"].sort_values("Eficiencia %", ascending=False)
@@ -2033,7 +2146,6 @@ def gerar_conclusao_geral(ctx):
                    f"Maior saldo aberto: {maior_aberto['Agente']} ({fmt_brl_rep(maior_aberto['Em aberto (R$)'])} "
                    f"com eficiência de {maior_aberto['Eficiencia %']:.1%}).")
 
-    # ---- Segmentos ---------------------------------------------------------
     seg_top_txt = "-"
     seg_crit_txt = "-"
     if c["seg"] is not None and not c["seg"].empty and c["seg"]["Eficiencia %"].notna().any():
@@ -2045,7 +2157,6 @@ def gerar_conclusao_geral(ctx):
             seg_top_txt = ", ".join(f"{r['Segmento']} ({r['Eficiencia %']:.1%})" for _, r in top_seg.iterrows())
             seg_crit_txt = ", ".join(f"{r['Segmento']} ({r['Eficiencia %']:.1%})" for _, r in crit_seg.iterrows())
 
-    # ---- KPI table ---------------------------------------------------------
     ticket = c["contratos_total"]["valor"].mean() if len(c["contratos_total"]) else 0
     kpi_rows = [
         ("Lucro Bruto Real", fmt_brl_rep(lucro), "Lucro acumulado sem deduzir provisão"),
@@ -2063,7 +2174,6 @@ def gerar_conclusao_geral(ctx):
     kpi_tabela = "| Indicador (KPI) | Valor Atual | Status / Impacto |\n|---|---|---|\n"
     kpi_tabela += "\n".join(f"| {a} | {b} | {d} |" for a, b, d in kpi_rows)
 
-    # ---- Fortes / Riscos ---------------------------------------------------
     pontos_fortes = [
         f"Modelo gera lucro bruto significativo ({fmt_brl_rep(lucro)}) e cobre {cobertura:.1f}x o risco de perda estimado.",
         f"Eficiência de cobrança recente é {cob_qual.lower()} ({c['eficiencia_recente']:.1%}) e a inadimplência inicial "
@@ -2088,7 +2198,6 @@ def gerar_conclusao_geral(ctx):
         riscos_imediatos.append(f"A margem líquida ajustada ao risco é negativa ({fmt_brl_rep(lucro_liq)}), tornando a operação "
                                 f"sensível a qualquer aumento de inadimplência ou desconto.")
 
-    # ---- Recomendações -----------------------------------------------------
     rec_lista = []
     rec_lista.append(f"**Prioridade Crítica:** acionar cobrança externa e negociar com desconto progressivo para recuperar "
                      f"parte dos {fmt_brl_rep(c['aberto_90'])} em atraso 90+.")
@@ -2103,42 +2212,69 @@ def gerar_conclusao_geral(ctx):
     if cobertura < 2.0:
         rec_lista.append("**Ampliar o colchão de margem:** revisar pricing/taxas e política de descontos até a cobertura do risco chegar a ≥ 2x.")
 
-    # ---- Perfil de comportamento de pagamento ------------------------------
-    def _resumo_pagamento(by, label_cols, renomear=None):
-        prof = build_payment_profile(c["movimentos"], by)
-        if renomear and prof is not None and not prof.empty:
-            prof = prof.rename(columns={renomear[0]: renomear[1]})
-        melhor, pior, igual, ml, pl = comparar_pagadores(prof, label_cols)
-        if melhor is None:
-            return "Sem dados suficientes."
-        if igual:
-            return f"pagadores **semelhantes** (~{melhor['Eficiencia %']:.1%} de eficiência)."
-        return (f"melhor pagador: **{ml}** ({melhor['Eficiencia %']:.1%} efic., "
-                f"{melhor['% Parcelas pagas']:.1%} parcelas pagas); mais inadimplente: **{pl}** "
-                f"({pior['Eficiencia %']:.1%} efic., {pior['% Aberto 90+']:.1%} do aberto em 90+).")
+    pag_por_idade = "Sem dados suficientes."
+    try:
+        prof_idade = build_payment_profile(c["movimentos"], ["faixa_idade"])
+        melhor, pior, igual, ml, pl = comparar_pagadores(prof_idade, ["faixa_idade"])
+        if melhor is not None:
+            if igual:
+                pag_por_idade = f"pagadores **semelhantes** (~{melhor['Eficiencia %']:.1%} de eficiência)."
+            else:
+                pag_por_idade = (f"melhor pagador: **{ml}** ({melhor['Eficiencia %']:.1%} efic., "
+                                 f"{melhor['% Parcelas pagas']:.1%} parcelas pagas); mais inadimplente: **{pl}** "
+                                 f"({pior['Eficiencia %']:.1%} efic., {pior['% Aberto 90+']:.1%} do aberto em 90+).")
+    except Exception:
+        pass
 
-    pag_por_idade = _resumo_pagamento(["faixa_idade"], ["faixa_idade"])
-    pag_por_sexo_idade = _resumo_pagamento(["genero_cat", "faixa_idade"], ["genero_cat", "faixa_idade"])
-    pag_por_segmento = _resumo_pagamento(["nome_estabelecimento_norm"], ["Segmento"], renomear=("nome_estabelecimento_norm", "Segmento"))
+    pag_por_sexo_idade = "Sem dados suficientes."
+    try:
+        prof_gen = build_payment_profile(c["movimentos"], ["genero_cat", "faixa_idade"])
+        melhor, pior, igual, ml, pl = comparar_pagadores(prof_gen, ["genero_cat", "faixa_idade"])
+        if melhor is not None:
+            if igual:
+                pag_por_sexo_idade = f"pagadores **semelhantes** (~{melhor['Eficiencia %']:.1%} de eficiência)."
+            else:
+                pag_por_sexo_idade = (f"melhor pagador: **{ml}** ({melhor['Eficiencia %']:.1%} efic., "
+                                      f"{melhor['% Parcelas pagas']:.1%} parcelas pagas); mais inadimplente: **{pl}** "
+                                      f"({pior['Eficiencia %']:.1%} efic., {pior['% Aberto 90+']:.1%} do aberto em 90+).")
+    except Exception:
+        pass
 
-    # ---- Inadimplência vs Recebimento por grupo ----------------------------
+    pag_por_segmento = "Sem dados suficientes."
+    try:
+        prof_seg = build_payment_profile(c["movimentos"], ["nome_estabelecimento_norm"])
+        if prof_seg is not None and not prof_seg.empty:
+            prof_seg = prof_seg.rename(columns={"nome_estabelecimento_norm": "Segmento"})
+            melhor, pior, igual, ml, pl = comparar_pagadores(prof_seg, ["Segmento"])
+            if melhor is not None:
+                if igual:
+                    pag_por_segmento = f"pagadores **semelhantes** (~{melhor['Eficiencia %']:.1%} de eficiência)."
+                else:
+                    pag_por_segmento = (f"melhor pagador: **{ml}** ({melhor['Eficiencia %']:.1%} efic., "
+                                        f"{melhor['% Parcelas pagas']:.1%} parcelas pagas); mais inadimplente: **{pl}** "
+                                        f"({pior['Eficiencia %']:.1%} efic., {pior['% Aberto 90+']:.1%} do aberto em 90+).")
+    except Exception:
+        pass
+
     def _resumo_coorte(by, label_cols):
-        co = build_coorte_recebimento(c["movimentos"], by)
-        mais_rec = top_coorte(co, "Recebido_geral", label_cols)
-        mais_inad = top_coorte(co, "Inadimplencia", label_cols)
-        maior_risco = top_coorte(co, "% Inadimplencia", label_cols)
-        if co is None or co.empty:
-            return "Sem dados suficientes."
-        parte_rec = " • ".join(f"{l} (R${v:,.0f})" for l, v in mais_rec) if mais_rec else "-"
-        parte_inad = " • ".join(f"{l} (R${v:,.0f})" for l, v in mais_inad) if mais_inad else "-"
-        parte_risco = " • ".join(f"{l} ({v:.1%})" for l, v in maior_risco) if maior_risco else "-"
-        return (f"+ recebimento: **{parte_rec}**; mais inadimplência (valor): **{parte_inad}**; "
-                f"maior risco (%): **{parte_risco}**.")
+        try:
+            co = build_coorte_recebimento(c["movimentos"], by)
+            mais_rec = top_coorte(co, "Recebido_geral", label_cols)
+            mais_inad = top_coorte(co, "Inadimplencia", label_cols)
+            maior_risco = top_coorte(co, "% Inadimplencia", label_cols)
+            if co is None or co.empty:
+                return "Sem dados suficientes."
+            parte_rec = " • ".join(f"{l} (R${v:,.0f})" for l, v in mais_rec) if mais_rec else "-"
+            parte_inad = " • ".join(f"{l} (R${v:,.0f})" for l, v in mais_inad) if mais_inad else "-"
+            parte_risco = " • ".join(f"{l} ({v:.1%})" for l, v in maior_risco) if maior_risco else "-"
+            return (f"+ recebimento: **{parte_rec}**; mais inadimplência (valor): **{parte_inad}**; "
+                    f"maior risco (%): **{parte_risco}**.")
+        except Exception:
+            return "Erro ao calcular."
 
     coorte_idade = _resumo_coorte(["faixa_idade"], ["faixa_idade"])
     coorte_sexo_idade = _resumo_coorte(["genero_cat", "faixa_idade"], ["genero_cat", "faixa_idade"])
 
-    # ---- Faixa de valor por contrato ----------------------------------------
     vf = build_perfil_valor_contrato(c["contratos"])
     vf_txt = "Sem dados suficientes."
     if vf is not None and not vf.empty:
@@ -2149,16 +2285,12 @@ def gerar_conclusao_geral(ctx):
                   f"mais inadimplência: **{faixa_mais_inad['Faixa Valor']}** (R${faixa_mais_inad['Vencido']:,.0f}); "
                   f"maior default 90d: **{faixa_mais_risco['Faixa Valor']}** ({faixa_mais_risco['Default_%']:.1%}).")
 
-    # ---- Estratégia de valor inicial por perfil -----------------------------
     estrategia_txt = (
         "Valor inicial por perfil (% do teto/capacidade): **Novo 30%**, **Risco 25%**, "
         "**Recorrente 55%**, **Confiável 75%**. Escalonamento: +25% do limite a cada contrato "
-        "pago em dia (Risco: +20%), até um teto fixo de 75% do valor solicitado. "
-        "Sugestão operacional: começar pelo valor inicial e subir apenas com histórico de "
-        "pagamentos pontuais, evitando perder o contrato ao recusar o valor integral de imediato."
+        "pago em dia (Risco: +20%), até um teto fixo de 75% do valor solicitado."
     )
 
-    # ---- Viabilidade por perfil (resumo) ------------------------------------
     viab_perfil_txt = "Sem dados suficientes."
     try:
         perfil_alto = analisar_viabilidade_perfil(
@@ -2170,14 +2302,11 @@ def gerar_conclusao_geral(ctx):
                 f"do movimentado. A avaliação por perfil combina essa eficiência com a faixa de valor "
                 f"solicitada: perfis com tendência **Alta/Média** (inadimplência elevada ou baixa eficiência) "
                 f"devem receber valor inicial reduzido (~25–40%) e escalonar conforme pagamentos; perfis de "
-                f"tendência **Baixa** podem receber próximo do valor solicitado (~60%). "
-                f"Use o simulador de viabilidade por perfil para avaliar sexo, idade, segmento e valor antes "
-                f"de conceder um novo contrato."
+                f"tendência **Baixa** podem receber próximo do valor solicitado (~60%)."
             )
     except Exception:
         viab_perfil_txt = "Não foi possível calcular no momento."
 
-    # ---- Montagem final ----------------------------------------------------
     return f"""## Resumo Executivo
 
 **{saude_titulo}** {saude_txt}
@@ -2256,7 +2385,6 @@ def gerar_conclusao_geral(ctx):
 ## Recomendações Estratégicas
 {chr(10).join('• ' + p for p in rec_lista)}"""
 
-
 def gerar_relatorio_geral(ctx, paginas_selecionadas):
     geradores = {
         "Visao Geral": gerar_relatorio_visao_geral,
@@ -2301,7 +2429,7 @@ def main():
     
     use_fake_data = st.sidebar.checkbox(
         "Usar dados fictícios (Faker)", 
-        value=True,
+        value=False,
         help="Ative para demonstração com dados gerados aleatoriamente. Desative para usar dados reais do banco."
     )
     
@@ -2335,9 +2463,13 @@ def main():
 
     contratos_total = contratos.copy()
     movimentos_total = movimentos.copy()
+    period_active = bool(apply_period and start_date and end_date)
 
-    if start_date and end_date and apply_period:
+    if period_active:
         contratos, movimentos = apply_period_filter(contratos, movimentos, start_date, end_date)
+
+    ativos_contratos = contratos.copy()
+    ativos_movimentos = movimentos.copy()
 
     hoje_ts = pd.Timestamp(today)
     aberto = movimentos.loc[~movimentos["status_pago"], "areceber"].sum()
@@ -2363,28 +2495,36 @@ def main():
     recebido_total = movimentos_total["valorrecebido"].sum()
     aberto_total = movimentos_total.loc[~movimentos_total["status_pago"], "areceber"].sum()
 
-    lgd_rates = compute_lgd_observada(movimentos_total)
-    backlog_df_total = build_backlog(movimentos_total, hoje_ts)
+    dataset_base_contratos = contratos if period_active else contratos_total
+    dataset_base_movimentos = movimentos if period_active else movimentos_total
+
+    lgd_rates = compute_lgd_observada(dataset_base_movimentos)
+    backlog_df_total = build_backlog(dataset_base_movimentos, hoje_ts)
     pdd_df_total = build_pdd(backlog_df_total, lgd_rates)
     pdd_total = pdd_df_total["PDD"].sum() if not pdd_df_total.empty else 0.0
 
-    backlog_df = build_backlog(movimentos, hoje_ts)
+    backlog_df = build_backlog(dataset_base_movimentos, hoje_ts)
     pdd_df = build_pdd(backlog_df, lgd_rates)
     pdd = pdd_df["PDD"].sum() if not pdd_df.empty else 0.0
 
-    cf, eficiencia, eficiencia_recente = build_cashflow(movimentos, contratos, hoje_ts)
-    recovery = build_recovery_curve(movimentos)
-    dow = build_dow_analysis(movimentos)
-    agentes = build_agent_performance(contratos, movimentos, usuarios)
-    monthly_return = build_monthly_return(movimentos)
-    monthly_eff = build_monthly_efficiency(movimentos)
-    fpd = build_fpd(movimentos, contratos)
-    roll_rate = build_roll_rate(movimentos)
-    concentracao = build_concentration(movimentos)
+    period_start_ts = pd.Timestamp(start_date) if period_active and start_date else None
+    period_end_exclusive = pd.Timestamp(end_date) + pd.Timedelta(days=1) if period_active and end_date else None
+    period_end_ts = pd.Timestamp(end_date) if period_active and end_date else None
 
-    aberto_80_89 = movimentos.loc[movimentos["vencido"] & movimentos["dias_atraso"].between(80, 89), "areceber"].sum()
+    cf, eficiencia, eficiencia_recente = build_cashflow(dataset_base_movimentos, dataset_base_contratos, hoje_ts,
+                                                     period_start=period_start_ts, period_end=period_end_exclusive)
+    recovery = build_recovery_curve(dataset_base_movimentos)
+    dow = build_dow_analysis(dataset_base_movimentos)
+    agentes = build_agent_performance(dataset_base_contratos, dataset_base_movimentos, usuarios)
+    monthly_return = build_monthly_return(dataset_base_movimentos, period_start=period_start_ts, period_end=period_end_exclusive)
+    monthly_eff = build_monthly_efficiency(dataset_base_movimentos, period_start=period_start_ts, period_end=period_end_exclusive)
+    fpd = build_fpd(dataset_base_movimentos, dataset_base_contratos)
+    roll_rate = build_roll_rate(dataset_base_movimentos)
+    concentracao = build_concentration(dataset_base_movimentos)
+
+    aberto_80_89 = dataset_base_movimentos.loc[dataset_base_movimentos["vencido"] & dataset_base_movimentos["dias_atraso"].between(80, 89), "areceber"].sum()
     futuro_30d = hoje_ts + pd.Timedelta(days=30)
-    open_next_30 = movimentos.loc[movimentos["a_vencer"] & (movimentos["dtvenc"] <= futuro_30d), "areceber"].sum()
+    open_next_30 = dataset_base_movimentos.loc[dataset_base_movimentos["a_vencer"] & (dataset_base_movimentos["dtvenc"] <= futuro_30d), "areceber"].sum()
 
     best_agente = pior_agente = None
     if not agentes.empty:
@@ -2401,15 +2541,27 @@ def main():
         best_agente, pior_agente, best_dow, worst_dow, contratos_novos_30d, fpd, concentracao["hhi"],
     )
 
-    viab = build_viability_analysis(contratos_total, movimentos_total, pdd_total)
-    monthly_profit = build_monthly_profit(movimentos_total)
+    # =========================================================================
+    # CORREÇÃO: Chamar as funções com os períodos corretos
+    # =========================================================================
+    viab = build_viability_analysis(
+        dataset_base_contratos, 
+        dataset_base_movimentos, 
+        pdd_total,
+        period_start=period_start_ts, 
+        period_end=period_end_exclusive
+    )
+    
+    monthly_profit = build_monthly_profit(
+        dataset_base_movimentos, 
+        period_start=period_start_ts, 
+        period_end=period_end_exclusive
+    )
 
     # ---- Dados auxiliares para o relatório ---------------------------------
     new_ct = contratos[contratos["dtinicio"].notna()].copy()
-    if apply_period and start_date and end_date:
-        period_start_ts = pd.Timestamp(start_date)
-        period_end_ts = pd.Timestamp(end_date) + pd.Timedelta(days=1)
-        new_ct = new_ct[(new_ct["dtinicio"] >= period_start_ts) & (new_ct["dtinicio"] < period_end_ts)].copy()
+    if period_active:
+        new_ct = new_ct[(new_ct["dtinicio"] >= period_start_ts) & (new_ct["dtinicio"] < period_end_exclusive)].copy()
 
     seg = movimentos.groupby("nome_estabelecimento_norm").agg(
         Recebido=("valorrecebido", "sum"),
@@ -2798,13 +2950,13 @@ def main():
         st.subheader("Originacao e maturacao")
         new_ct = contratos[contratos["dtinicio"].notna()].copy()
         period_start_ts = pd.Timestamp(start_date) if start_date else None
-        period_end_ts = pd.Timestamp(end_date) + pd.Timedelta(days=1) if end_date else None
-        if apply_period and period_start_ts and period_end_ts:
-            new_ct = new_ct[(new_ct["dtinicio"] >= period_start_ts) & (new_ct["dtinicio"] < period_end_ts)].copy()
+        period_end_exclusive = pd.Timestamp(end_date) + pd.Timedelta(days=1) if end_date else None
+        if apply_period and period_start_ts and period_end_exclusive:
+            new_ct = new_ct[(new_ct["dtinicio"] >= period_start_ts) & (new_ct["dtinicio"] < period_end_exclusive)].copy()
 
         if not new_ct.empty:
             stats_start = period_start_ts if apply_period and period_start_ts else new_ct["dtinicio"].min()
-            stats_end = period_end_ts - pd.Timedelta(days=1) if apply_period and period_end_ts else new_ct["dtinicio"].max()
+            stats_end = pd.Timestamp(end_date) if apply_period and end_date else new_ct["dtinicio"].max()
             novos_stats = build_new_contract_stats(new_ct, stats_start, stats_end)
             novos_stats_view = pd.DataFrame(novos_stats).T.reset_index().rename(columns={"index": "Periodicidade"})
             new_ct["mes"] = new_ct["dtinicio"].dt.to_period("M").dt.to_timestamp()
@@ -2864,12 +3016,16 @@ def main():
         show(view_seg)
 
     # =========================================================================
-    # TAB 6 - CONTROLE
+    # TAB 6 - CONTROLE (CORRIGIDA)
     # =========================================================================
     elif aba == "Controle":
         st.subheader("Controle de carteira - contratos e exclusoes")
-        st.markdown("##### Resumo por situacao (portfolio completo)")
-        status_df = contratos_total.groupby("status").agg(
+        
+        # Usar contratos filtrados ou todos dependendo do contexto
+        contratos_para_analise = contratos if period_active else contratos_total
+        
+        st.markdown("##### Resumo por situacao (portfolio filtrado)")
+        status_df = contratos_para_analise.groupby("status").agg(
             Contratos=("id", "count"),
             Principal=("valor", "sum"),
             A_receber=("valor_parcelado", "sum"),
@@ -2879,8 +3035,8 @@ def main():
         st.dataframe(status_df, hide_index=True, use_container_width=True)
 
         c1, c2, c3 = st.columns(3)
-        c1.metric("Total contratos (validos)", len(contratos_total))
-        c2.metric("Principal total (portfolio)", fmt_brl(principal_total))
+        c1.metric("Total contratos (validos)", len(contratos_para_analise))
+        c2.metric("Principal total (portfolio)", fmt_brl(contratos_para_analise["valor"].sum()))
         c3.metric("Principal no periodo", fmt_brl(principal))
 
         st.markdown("---")
@@ -3679,12 +3835,19 @@ def main():
     # =========================================================================
     elif aba == "Dados":
         st.subheader("Dados brutos")
-        if st.checkbox("Mostrar movimentacoes completas", value=False):
+        
+        # Mostrar dados com base no filtro aplicado
+        st.markdown("##### Dados do período filtrado")
+        if st.checkbox("Mostrar movimentacoes (periodo filtrado)", value=False):
             show(movimentos)
-        if st.checkbox("Mostrar contratos (periodo)", value=False):
+        if st.checkbox("Mostrar contratos (periodo filtrado)", value=False):
             show(contratos)
+        
+        st.markdown("##### Dados completos (sem filtro)")
         if st.checkbox("Mostrar todos os contratos (portfolio completo)", value=False):
             show(contratos_total)
+        if st.checkbox("Mostrar todos os movimentos (portfolio completo)", value=False):
+            show(movimentos_total)
 
 if __name__ == "__main__":
     main()
