@@ -16,7 +16,6 @@ try:
     FAKER_AVAILABLE = True
 except ImportError:
     FAKER_AVAILABLE = False
-
 try:
     from sklearn.ensemble import RandomForestClassifier, IsolationForest
     from sklearn.model_selection import train_test_split
@@ -262,7 +261,7 @@ def normalize_estabelecimento(name: str) -> str:
         ("ACOUGUE", "ACOUGUE"), ("LANCH", "LANCHONETE"), ("ACAI", "ACAI"),
         ("BOLO", "CONFEITARIA"), ("DOCE", "CONFEITARIA"), ("FARM", "FARMACIA"),
         ("CABEL", "SALAO/BELEZA"), ("MOTOR", "TRANSPORTE"), ("TRANSPORT", "TRANSPORTE"),
-        ("MOTOTAXI", "TRANSPORTE"), ("PADARIA", "PADARIA/PANIFICADORA"),
+        ("MOTOTAXI", "TRANSPORTE"), ('DIARISTA', "DIARISTA"), ('LAVA-JATO', "LAVA-JATO"), ("PADARIA", "PADARIA/PANIFICADORA"),
     ]
     for token, label in patterns:
         if token in x:
@@ -1401,6 +1400,372 @@ def build_box_plot(movimentos):
         st.error(f"Erro no Box Plot: {str(e)}")
         return pd.DataFrame()
 
+def build_payment_profile(movimentos, by):
+    """Perfil de comportamento de pagamento por uma ou mais dimensões (idade, sexo, segmento...).
+
+    Retorna DataFrame com métricas por grupo: recebido, aberto, eficiência,
+    % parcelas pagas, % do aberto em 90+, atraso médio e nº de clientes.
+    """
+    mo = movimentos[~movimentos["dtvenc"].isna()].copy()
+    g = mo.groupby(by)
+    df = g.agg(
+        Clientes=("idcliente", "nunique"),
+        Parcelas=("id", "count"),
+        Recebido=("valorrecebido", "sum"),
+        Em_aberto=("areceber", lambda s: s[mo.loc[s.index, "status_pago"] == False].sum()),
+        Aberto_90=("areceber", lambda s: s[mo.loc[s.index, "atraso_90"]].sum()),
+        Parcelas_pagas=("status_pago", "sum"),
+        Atraso_medio=("dias_atraso", "mean"),
+    ).reset_index()
+    df["Total"] = df["Recebido"] + df["Em_aberto"]
+    df["Eficiencia %"] = df["Recebido"] / df["Total"].replace(0, np.nan)
+    df["% Parcelas pagas"] = df["Parcelas_pagas"] / df["Parcelas"].replace(0, np.nan)
+    df["% Aberto 90+"] = df["Aberto_90"] / df["Em_aberto"].replace(0, np.nan)
+    df["Atraso medio (dias)"] = df["Atraso_medio"].round(1)
+    df = df.sort_values("Eficiencia %", ascending=False)
+    return df
+
+
+def _grupo_label(row, label_cols):
+    """Constrói rótulo legível do grupo a partir de uma ou mais colunas."""
+    if not label_cols:
+        return "-"
+    partes = []
+    for col in label_cols:
+        if col in row.index:
+            v = row[col]
+            if isinstance(v, (pd.Period, pd.Interval)):
+                v = str(v)
+            partes.append(str(v))
+    return " + ".join(partes) if partes else "-"
+
+
+def comparar_pagadores(profile_df, label_cols):
+    """Identifica o melhor e o pior pagador de um perfil, e se são iguais/semelhantes.
+
+    Retorna (melhor_linha, pior_linha, igual, melhor_label, pior_label).
+    """
+    if profile_df is None or profile_df.empty:
+        return None, None, None, None, None
+    df = profile_df.copy()
+    df = df[df["Clientes"] > 0]
+    df = df[df["Eficiencia %"].notna()]
+    if df.empty:
+        return None, None, None, None, None
+    melhor = df.sort_values("Eficiencia %", ascending=False).iloc[0]
+    pior = df.sort_values("Eficiencia %", ascending=True).iloc[0]
+    dif = melhor["Eficiencia %"] - pior["Eficiencia %"]
+    igual = dif < 0.05 and len(df) > 1
+    m_label = _grupo_label(melhor, label_cols)
+    p_label = _grupo_label(pior, label_cols)
+    return melhor, pior, igual, m_label, p_label
+
+
+def build_coorte_recebimento(movimentos, by):
+    """Por grupo (faixa etária / sexo+idade), mede quais tendem a + RECEBIMENTO (geral)
+    e + INADIMPLÊNCIA, com contagem de contratos e clientes.
+
+    Retorna DataFrame com colunas de rótulo + Recebido_geral, Vencido, Atraso_90,
+    Inadimplencia (vencido+90+), Contratos, Clientes, Parcelas.
+    """
+    mo = movimentos[~movimentos["dtvenc"].isna()].copy()
+    g = mo.groupby(by)
+    df = g.agg(
+        Contratos=("idcontrato", "nunique"),
+        Clientes=("idcliente", "nunique"),
+        Parcelas=("id", "count"),
+        Recebido_geral=("valorrecebido", "sum"),
+        Vencido=("areceber", lambda s: s[mo.loc[s.index, "vencido"]].sum()),
+        Atraso_90=("areceber", lambda s: s[mo.loc[s.index, "atraso_90"]].sum()),
+        Total_mov=("areceber", "sum"),
+    ).reset_index()
+    df["Inadimplencia"] = df["Vencido"]
+    df["% Inadimplencia"] = df["Inadimplencia"] / df["Total_mov"].replace(0, np.nan)
+    df["Recebido_geral"] = df["Recebido_geral"].round(2)
+    df["Vencido"] = df["Vencido"].round(2)
+    df["Atraso_90"] = df["Atraso_90"].round(2)
+    df["Inadimplencia"] = df["Inadimplencia"].round(2)
+    df["Contratos"] = df["Contratos"].astype(int)
+    df["Clientes"] = df["Clientes"].astype(int)
+    df["Parcelas"] = df["Parcelas"].astype(int)
+    return df
+
+
+def top_coorte(df, col, label_cols, n=3, descendente=True):
+    """Retorna os n grupos de maior/menor valor em uma coluna numérica do coorte."""
+    if df is None or df.empty or col not in df.columns:
+        return []
+    d = df[df[col].notna()].sort_values(col, ascending=not descendente).head(n)
+    out = []
+    for _, r in d.iterrows():
+        lbl = _grupo_label(r, label_cols)
+        out.append((lbl, r[col]))
+    return out
+
+
+FAIXAS_VALOR_CONTRATO = [0, 1000, 2000, 3000, 4000, 5000, 1_000_000]
+
+
+def build_perfil_valor_contrato(contratos):
+    """Por FAIXA DE VALOR DE CONTRATO, mede recebimento, inadimplência e risco.
+
+    Retorna DataFrame com faixa de valor, nº contratos/clientes, valor total,
+    recebido, inadimplência (vencido/90+), default 90d e % do recebido.
+    """
+    cc = contratos.dropna(subset=["valor"]).copy()
+    if cc.empty:
+        return pd.DataFrame()
+    cc["Faixa Valor"] = pd.cut(cc["valor"], bins=FAIXAS_VALOR_CONTRATO,
+                               right=False, include_lowest=True)
+    g = cc.groupby("Faixa Valor", observed=True)
+    df = g.agg(
+        Contratos=("id", "count"),
+        Clientes=("idcliente", "nunique"),
+        Valor_total=("valor", "sum"),
+        Recebido=("total_recebido", "sum"),
+        Aberto=("total_aberto", "sum"),
+        Vencido=("vencido_valor", "sum"),
+        Default_90d=("default_90d", "sum"),
+        Receb_pct_med=("percentual_recebido", "mean"),
+    ).reset_index()
+    df["Faixa Valor"] = df["Faixa Valor"].astype(str)
+    df["Default_%"] = df["Default_90d"] / df["Contratos"].replace(0, np.nan)
+    df["% Inadimplencia"] = df["Vencido"] / (df["Aberto"] + df["Recebido"]).replace(0, np.nan)
+    for col in ["Valor_total", "Recebido", "Aberto", "Vencido"]:
+        df[col] = df[col].round(2)
+    df = df.sort_values("Valor_total", ascending=False)
+    return df
+
+
+def build_coorte_valor_contrato(contratos):
+    """Coorte por FAIXA DE VALOR DE CONTRATO no formato usado por render_coorte/top_coorte.
+
+    Colunas: Faixa Valor, Contratos, Clientes, Parcelas, Recebido_geral, Vencido,
+    Atraso_90, Inadimplencia, % Inadimplencia.
+    """
+    cc = contratos.dropna(subset=["valor"]).copy()
+    if cc.empty:
+        return pd.DataFrame()
+    cc["Faixa Valor"] = pd.cut(cc["valor"], bins=FAIXAS_VALOR_CONTRATO,
+                               right=False, include_lowest=True)
+    g = cc.groupby("Faixa Valor", observed=True)
+    df = g.agg(
+        Contratos=("id", "count"),
+        Clientes=("idcliente", "nunique"),
+        Parcelas=("id", "count"),
+        Recebido_geral=("total_recebido", "sum"),
+        Vencido=("vencido_valor", "sum"),
+        Atraso_90=("default_90d", lambda s: int(s.sum())),
+    ).reset_index()
+    df["Faixa Valor"] = df["Faixa Valor"].astype(str)
+    df["Inadimplencia"] = df["Vencido"]
+    denom = (df["Vencido"] + df["Recebido_geral"]).replace(0, np.nan)
+    df["% Inadimplencia"] = df["Vencido"] / denom
+    for col in ["Recebido_geral", "Vencido", "Atraso_90", "Inadimplencia"]:
+        df[col] = df[col].round(2)
+    df = df.sort_values("Recebido_geral", ascending=False)
+    return df
+
+
+def perfil_cliente(contratos, idcliente):
+    """Histórico de relacionamento de um cliente: nº contratos, default, % recebido, valor médio."""
+    h = contratos[contratos["idcliente"] == idcliente]
+    if h.empty:
+        return {"n_contratos": 0, "default": 0, "receb_pct": None,
+                "valor_medio": None, "valor_solicitado": None}
+    return {
+        "n_contratos": int(h["id"].nunique()),
+        "default": int(h["default_90d"].sum()),
+        "receb_pct": float(h["percentual_recebido"].mean()),
+        "valor_medio": float(h["valor"].mean()),
+        "valor_solicitado": float(h["valor"].max()),
+    }
+
+
+def classificar_risco_cliente(perfil):
+    """Classifica o risco do cliente (para liberar crédito): Novo/Recorrente/Confiavel/Risco."""
+    n = perfil["n_contratos"]
+    if n == 0:
+        return "Novo"
+    if perfil["default"] > 0:
+        return "Risco"
+    rp = perfil["receb_pct"]
+    if rp is None:
+        return "Recorrente"
+    if n >= 2 and rp >= 0.75:
+        return "Confiavel"
+    return "Recorrente"
+
+
+def recomendar_valor_contrato(perfil, valor_solicitado=None, valor_max_teto=None):
+    """Estratégia de valor INICIAL do contrato e escalonamento conforme relacionamento.
+
+    Retorna dicionário com valor inicial sugerido, faixa de risco, e plano de
+    escalonamento (listas de [etapa, % do teto, valor, condição]).
+    """
+    risco = classificar_risco_cliente(perfil)
+    solicitado = valor_solicitado if valor_solicitado is not None else perfil.get("valor_solicitado")
+    base = solicitado if solicitado and solicitado > 0 else (perfil.get("valor_medio") or 0)
+    teto = valor_max_teto if valor_max_teto is not None else base
+    if base <= 0:
+        base = 1000.0
+
+    regras = {
+        # (teto, % inicial, % de aumento por contrato pago, condição para subir a etapa)
+        "Novo":       dict(ini=0.30, passo=0.25, desc="cliente novo, sem histórico"),
+        "Risco":      dict(ini=0.25, passo=0.20, desc="histórico com inadimplência 90+"),
+        "Recorrente": dict(ini=0.55, passo=0.25, desc="relação recorrente, sem default"),
+        "Confiavel":  dict(ini=0.75, passo=0.25, desc="relação sólida, ≥2 contratos pagos"),
+    }
+    regra = regras.get(risco, regras["Novo"])
+
+    inicial = round(teto * regra["ini"], 2)
+    limite_fixo = round(teto * 0.75, 2) if teto else inicial
+
+    plano = []
+    cap = inicial
+    etapa = 1
+    while cap < limite_fixo - 1:
+        cap = min(round(cap * (1 + regra["passo"]), 2), limite_fixo)
+        plano.append({"etapa": etapa,
+                      "capacidade": cap,
+                      "pct_teto": cap / teto if teto else 0,
+                      "condicao": f"{etapa} contrato(s) pago(s) em dia"})
+        etapa += 1
+    if teto and round(limite_fixo, 2) < round(teto, 2):
+        plano.append({"etapa": etapa,
+                      "capacidade": round(teto, 2),
+                      "pct_teto": 1.0,
+                      "condicao": "consistência de longo prazo (sinais de pós-pagamento estáveis)"})
+
+    return {
+        "classe": risco,
+        "descricao": regra["desc"],
+        "teto": teto,
+        "valor_inicial": inicial,
+        "pct_inicial": regra["ini"],
+        "limite_fixo": limite_fixo,
+        "plano": plano,
+    }
+
+
+_IDADE_BINS = [0, 18, 25, 35, 45, 55, 65, 200]
+_IDADE_LABELS = ["<18", "18-25", "26-35", "36-45", "46-55", "56-65", ">65"]
+
+
+def _idade_para_faixa(idade):
+    if idade is None:
+        return None
+    try:
+        idd = int(idade)
+    except Exception:
+        return None
+    if idd <= 0:
+        return None
+    label = pd.cut([idd], bins=_IDADE_BINS, labels=_IDADE_LABELS)[0]
+    return str(label)
+
+
+def analisar_viabilidade_perfil(movimentos, contratos, genero=None, idade=None,
+                                segmento=None, valor=None):
+    """Simula a viabilidade de conceder um contrato a um perfil (sexo, idade,
+    segmento, valor), indicando a tendência à inadimplência e se é viável.
+
+    Retorna dicionário com amostra comparável, eficiência, inadimplência,
+    tendência (Baixa/Média/Alta) e veredito de viabilidade + valor inicial.
+    """
+    faixa_idade = _idade_para_faixa(idade)
+    mo = movimentos[~movimentos["dtvenc"].isna()].copy()
+    amostra = mo.copy()
+
+    if genero and genero != "Todos":
+        amostra = amostra[amostra["genero_cat"] == genero]
+    if faixa_idade:
+        amostra = amostra[amostra["faixa_idade"] == faixa_idade]
+    if segmento and segmento != "Sem segmento":
+        amostra = amostra[amostra["nome_estabelecimento_norm"] == segmento]
+
+    n_clientes = amostra["idcliente"].nunique()
+    n_contratos = amostra["idcontrato"].nunique()
+    recebido = float(amostra["valorrecebido"].sum())
+    aberto_np = float(amostra.loc[~amostra["status_pago"], "areceber"].sum())
+    vencido = float(amostra.loc[amostra["vencido"], "areceber"].sum())
+    aberto_90 = float(amostra.loc[amostra["atraso_90"], "areceber"].sum())
+
+    eficiencia = recebido / (recebido + aberto_np) if (recebido + aberto_np) > 0 else None
+    inad_pct = vencido / (vencido + recebido) if (vencido + recebido) > 0 else 0.0
+    grave_90_pct = aberto_90 / vencido if vencido > 0 else 0.0
+
+    base_default = None
+    previa = contratos[contratos["idcliente"].isin(amostra["idcliente"].unique())]
+    if len(previa) > 0:
+        base_default = float(previa["default_90d"].mean())
+
+    if eficiencia is None:
+        tendencia = "Sem dados"
+        veredito = "Não avaliável (sem histórico para o perfil)"
+        valor_inicial = (valor or 1000) * 0.30
+    else:
+        if inad_pct > 0.72 or eficiencia < 0.62 or (base_default is not None and base_default > 0.55):
+            tendencia = "Alta"
+        elif inad_pct > 0.58 or eficiencia < 0.70:
+            tendencia = "Média"
+        else:
+            tendencia = "Baixa"
+
+        # risco adicional pela faixa de valor solicitada
+        risco_faixa = 0.5
+        if valor:
+            vp = build_perfil_valor_contrato(contratos)
+            if vp is not None and not vp.empty:
+                alvo = valor
+                faixa_linha = vp.iloc[[0] if vp.empty else 0]
+                for _, r in vp.iterrows():
+                    if "Faixa Valor" in r.index and str(r["Faixa Valor"]).startswith("["):
+                        try:
+                            lo, hi = str(r["Faixa Valor"]).strip("[])").split(",")
+                            lo = float(lo); hi = float(hi)
+                            if lo <= alvo < hi:
+                                risco_faixa = float(r["Default_%"]) if pd.notna(r["Default_%"]) else 0.5
+                                break
+                        except Exception:
+                            continue
+            if tendencia == "Alta" or risco_faixa > 0.55:
+                veredito = "Alto risco — evitar valor integral; conceder valor menor ou recusar."
+                valor_inicial = (valor or 1000) * 0.25
+            elif tendencia == "Média" or risco_faixa > 0.45:
+                veredito = "Viável com cautela — conceder valor reduzido e escalonar com pagamento."
+                valor_inicial = (valor or 1000) * 0.40
+            else:
+                veredito = "Viável — perfil tende a não inadimplir; pode conceder próximo do solicitado."
+                valor_inicial = (valor or 1000) * 0.60
+        else:
+            veredito = ("Perfil tende a inadimplência" if tendencia in ("Alta", "Média")
+                        else "Perfil tende a não inadimplir")
+            valor_inicial = None
+
+    return {
+        "genero": genero or "Todos",
+        "idade": idade,
+        "faixa_idade": faixa_idade or "Todas",
+        "segmento": segmento or "Sem segmento",
+        "valor_solicitado": valor,
+        "amostra_contratos": n_contratos,
+        "amostra_clientes": n_clientes,
+        "recebido": recebido,
+        "aberto": aberto_np,
+        "vencido": vencido,
+        "aberto_90": aberto_90,
+        "eficiencia": eficiencia,
+        "inadimplencia_pct": inad_pct,
+        "default_base_pct": base_default,
+        "grave_90_pct": grave_90_pct,
+        "tendencia": tendencia,
+        "veredito": veredito,
+        "valor_inicial_sugerido": valor_inicial,
+    }
+
+
 # =============================================================================
 # RELATORIOS
 # =============================================================================
@@ -1738,6 +2103,80 @@ def gerar_conclusao_geral(ctx):
     if cobertura < 2.0:
         rec_lista.append("**Ampliar o colchão de margem:** revisar pricing/taxas e política de descontos até a cobertura do risco chegar a ≥ 2x.")
 
+    # ---- Perfil de comportamento de pagamento ------------------------------
+    def _resumo_pagamento(by, label_cols, renomear=None):
+        prof = build_payment_profile(c["movimentos"], by)
+        if renomear and prof is not None and not prof.empty:
+            prof = prof.rename(columns={renomear[0]: renomear[1]})
+        melhor, pior, igual, ml, pl = comparar_pagadores(prof, label_cols)
+        if melhor is None:
+            return "Sem dados suficientes."
+        if igual:
+            return f"pagadores **semelhantes** (~{melhor['Eficiencia %']:.1%} de eficiência)."
+        return (f"melhor pagador: **{ml}** ({melhor['Eficiencia %']:.1%} efic., "
+                f"{melhor['% Parcelas pagas']:.1%} parcelas pagas); mais inadimplente: **{pl}** "
+                f"({pior['Eficiencia %']:.1%} efic., {pior['% Aberto 90+']:.1%} do aberto em 90+).")
+
+    pag_por_idade = _resumo_pagamento(["faixa_idade"], ["faixa_idade"])
+    pag_por_sexo_idade = _resumo_pagamento(["genero_cat", "faixa_idade"], ["genero_cat", "faixa_idade"])
+    pag_por_segmento = _resumo_pagamento(["nome_estabelecimento_norm"], ["Segmento"], renomear=("nome_estabelecimento_norm", "Segmento"))
+
+    # ---- Inadimplência vs Recebimento por grupo ----------------------------
+    def _resumo_coorte(by, label_cols):
+        co = build_coorte_recebimento(c["movimentos"], by)
+        mais_rec = top_coorte(co, "Recebido_geral", label_cols)
+        mais_inad = top_coorte(co, "Inadimplencia", label_cols)
+        maior_risco = top_coorte(co, "% Inadimplencia", label_cols)
+        if co is None or co.empty:
+            return "Sem dados suficientes."
+        parte_rec = " • ".join(f"{l} (R${v:,.0f})" for l, v in mais_rec) if mais_rec else "-"
+        parte_inad = " • ".join(f"{l} (R${v:,.0f})" for l, v in mais_inad) if mais_inad else "-"
+        parte_risco = " • ".join(f"{l} ({v:.1%})" for l, v in maior_risco) if maior_risco else "-"
+        return (f"+ recebimento: **{parte_rec}**; mais inadimplência (valor): **{parte_inad}**; "
+                f"maior risco (%): **{parte_risco}**.")
+
+    coorte_idade = _resumo_coorte(["faixa_idade"], ["faixa_idade"])
+    coorte_sexo_idade = _resumo_coorte(["genero_cat", "faixa_idade"], ["genero_cat", "faixa_idade"])
+
+    # ---- Faixa de valor por contrato ----------------------------------------
+    vf = build_perfil_valor_contrato(c["contratos"])
+    vf_txt = "Sem dados suficientes."
+    if vf is not None and not vf.empty:
+        faixa_mais_rec = vf.loc[vf["Recebido"].idxmax()]
+        faixa_mais_inad = vf.loc[vf["Vencido"].idxmax()]
+        faixa_mais_risco = vf.loc[vf["Default_%"].idxmax()]
+        vf_txt = (f"+ recebimento: **{faixa_mais_rec['Faixa Valor']}** (R${faixa_mais_rec['Recebido']:,.0f}); "
+                  f"mais inadimplência: **{faixa_mais_inad['Faixa Valor']}** (R${faixa_mais_inad['Vencido']:,.0f}); "
+                  f"maior default 90d: **{faixa_mais_risco['Faixa Valor']}** ({faixa_mais_risco['Default_%']:.1%}).")
+
+    # ---- Estratégia de valor inicial por perfil -----------------------------
+    estrategia_txt = (
+        "Valor inicial por perfil (% do teto/capacidade): **Novo 30%**, **Risco 25%**, "
+        "**Recorrente 55%**, **Confiável 75%**. Escalonamento: +25% do limite a cada contrato "
+        "pago em dia (Risco: +20%), até um teto fixo de 75% do valor solicitado. "
+        "Sugestão operacional: começar pelo valor inicial e subir apenas com histórico de "
+        "pagamentos pontuais, evitando perder o contrato ao recusar o valor integral de imediato."
+    )
+
+    # ---- Viabilidade por perfil (resumo) ------------------------------------
+    viab_perfil_txt = "Sem dados suficientes."
+    try:
+        perfil_alto = analisar_viabilidade_perfil(
+            c["movimentos"], c["contratos"], genero=None, idade=None, segmento=None, valor=None)
+        if perfil_alto["amostra_clientes"] > 0:
+            viab_perfil_txt = (
+                f"A carteira registra eficiência de pagamento de "
+                f"{perfil_alto['eficiencia']:.1%} e inadimplência de {perfil_alto['inadimplencia_pct']:.1%} "
+                f"do movimentado. A avaliação por perfil combina essa eficiência com a faixa de valor "
+                f"solicitada: perfis com tendência **Alta/Média** (inadimplência elevada ou baixa eficiência) "
+                f"devem receber valor inicial reduzido (~25–40%) e escalonar conforme pagamentos; perfis de "
+                f"tendência **Baixa** podem receber próximo do valor solicitado (~60%). "
+                f"Use o simulador de viabilidade por perfil para avaliar sexo, idade, segmento e valor antes "
+                f"de conceder um novo contrato."
+            )
+    except Exception:
+        viab_perfil_txt = "Não foi possível calcular no momento."
+
     # ---- Montagem final ----------------------------------------------------
     return f"""## Resumo Executivo
 
@@ -1785,6 +2224,24 @@ def gerar_conclusao_geral(ctx):
 - **Segmentos críticos:** {seg_crit_txt}.
 - **Lucro Bruto Realizado:** {fmt_brl_rep(lucro)}, com margem de {v.get('margem_lucro_pct', 0):.1f}% sobre o principal recuperado.
 - **Ajustado pelo risco (PDD):** lucro líquido de {fmt_brl_rep(lucro_liq)}, com ROI ajustado ao risco de {roi_aj:.1f}%.
+
+### 6. Perfil de Comportamento de Pagamento
+- **Por faixa etária:** {pag_por_idade}
+- **Por sexo + faixa etária:** {pag_por_sexo_idade}
+- **Por segmento:** {pag_por_segmento}
+
+### 7. Inadimplência vs Recebimento por Faixa Etária
+- **Por faixa etária:** {coorte_idade}
+- **Por sexo + faixa etária:** {coorte_sexo_idade}
+
+### 8. Perfil por Faixa de Valor do Contrato
+{vf_txt}
+
+### 9. Estratégia de Valor Inicial por Perfil
+{estrategia_txt}
+
+### 10. Viabilidade por Perfil (Novo Contrato)
+{viab_perfil_txt}
 
 ## Conclusão
 
@@ -2026,14 +2483,15 @@ def main():
     if use_fake_data and FAKER_AVAILABLE:
         st.info("📊 **Modo de Demonstração:** Exibindo dados gerados aleatoriamente com Faker. Os dados são para fins de demonstração apenas.")
 
-    tab_geral, tab_caixa, tab_risco, tab_agentes, tab_carteira, tab_controle, tab_rent, tab_viabilidade, tab_modelos, tab_viz, tab_dados = st.tabs(
-        ["Visao Geral", "Fluxo de Caixa", "Risco & Cobranca", "Agentes", "Carteira", "Controle", "Rentabilidade", "Viabilidade & Lucro", "Modelos Preditivos", "Visualizacoes", "Dados"]
-    )
+    paginas = ["Visao Geral", "Fluxo de Caixa", "Risco & Cobranca", "Agentes", "Carteira",
+               "Controle", "Rentabilidade", "Viabilidade & Lucro", "Modelos Preditivos",
+               "Visualizacoes", "Dados"]
+    aba = st.sidebar.radio("📑 Navegação", paginas, index=0, key="nav_aba")
 
     # =========================================================================
     # TAB 1 - VISAO GERAL
     # =========================================================================
-    with tab_geral:
+    if aba == "Visao Geral":
         st.subheader("Resumo executivo")
         with st.expander("Como ler esta aba", expanded=False):
             st.markdown("""
@@ -2129,7 +2587,7 @@ def main():
     # =========================================================================
     # TAB 2 - FLUXO DE CAIXA
     # =========================================================================
-    with tab_caixa:
+    elif aba == "Fluxo de Caixa":
         st.subheader("Fluxo de caixa: cronograma contratual vs caixa efetivo")
         st.markdown(f"**Eficiencia historica:** {eficiencia:.1%} | **Eficiencia recente (90d):** {eficiencia_recente:.1%}")
 
@@ -2220,7 +2678,7 @@ def main():
     # =========================================================================
     # TAB 3 - RISCO & COBRANCA
     # =========================================================================
-    with tab_risco:
+    elif aba == "Risco & Cobranca":
         st.subheader("Backlog, PDD e metricas de risco")
 
         c1, c2, c3, c4 = st.columns(4)
@@ -2307,7 +2765,7 @@ def main():
     # =========================================================================
     # TAB 4 - AGENTES
     # =========================================================================
-    with tab_agentes:
+    elif aba == "Agentes":
         st.subheader("Performance por agente")
         if agentes.empty:
             st.info("Sem dados de agentes no filtro atual.")
@@ -2336,7 +2794,7 @@ def main():
     # =========================================================================
     # TAB 5 - CARTEIRA
     # =========================================================================
-    with tab_carteira:
+    elif aba == "Carteira":
         st.subheader("Originacao e maturacao")
         new_ct = contratos[contratos["dtinicio"].notna()].copy()
         period_start_ts = pd.Timestamp(start_date) if start_date else None
@@ -2408,7 +2866,7 @@ def main():
     # =========================================================================
     # TAB 6 - CONTROLE
     # =========================================================================
-    with tab_controle:
+    elif aba == "Controle":
         st.subheader("Controle de carteira - contratos e exclusoes")
         st.markdown("##### Resumo por situacao (portfolio completo)")
         status_df = contratos_total.groupby("status").agg(
@@ -2442,7 +2900,7 @@ def main():
     # =========================================================================
     # TAB 7 - RENTABILIDADE
     # =========================================================================
-    with tab_rent:
+    elif aba == "Rentabilidade":
         st.subheader("Rentabilidade do produto")
         frac_pond = (contratos["valor"].sum() / contratos["valor_parcelado"].sum()) if contratos["valor_parcelado"].sum() else 0
         juros_aberto_est = aberto * (1 - frac_pond)
@@ -2491,10 +2949,229 @@ def main():
             fig.update_layout(height=340, xaxis_tickangle=-20)
             st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 
+        st.markdown("---")
+        st.subheader("Perfil de comportamento de pagamento")
+        st.caption("Quem é o melhor pagador e quem é o mais inadimplente (por idade, sexo+idade e segmento).")
+
+        def render_perfil_pagamento(titulo, profile, label_cols):
+            st.markdown(f"##### {titulo}")
+            if profile is None or profile.empty:
+                st.info("Sem dados para esta dimensão.")
+                return
+            view = profile.copy()
+            for col in ["Eficiencia %", "% Parcelas pagas", "% Aberto 90+"]:
+                view[col] = (view[col] * 100).round(1)
+            for col in ["Recebido", "Em_aberto", "Total", "Aberto_90"]:
+                view[col] = view[col].round(2)
+            show(view)
+            if len(profile) > 1:
+                chart_df = profile.copy()
+                chart_df["Eficiencia %"] = (chart_df["Eficiencia %"] * 100).round(1)
+                xcol = label_cols[-1] if label_cols else profile.columns[0]
+                label_lbl = " + ".join(label_cols) if label_cols else "Grupo"
+                fig_fp = px.bar(chart_df, x=chart_df[xcol].astype(str), y="Eficiencia %",
+                                color="Eficiencia %", color_continuous_scale="RdYlGn",
+                                text="Eficiencia %", title=f"Eficiência de pagamento ({label_lbl})")
+                fig_fp.update_traces(texttemplate="%{text:.1f}%", textposition="outside")
+                fig_fp.update_layout(height=300, xaxis_tickangle=-20,
+                                     yaxis_title="Eficiência %", xaxis_title=label_lbl)
+                st.plotly_chart(fig_fp, use_container_width=True, config={"displayModeBar": False})
+            melhor, pior, igual, m_label, p_label = comparar_pagadores(profile, label_cols)
+            if melhor is not None:
+                if igual:
+                    st.success(f"⚖️ **Pagadores semelhantes:** não há diferença relevante de comportamento "
+                               f"(~{melhor['Eficiencia %']:.1%} de eficiência).")
+                else:
+                    st.success(f"🏆 **Melhor pagador:** {m_label} — eficiência {melhor['Eficiencia %']:.1%}, "
+                               f"{melhor['% Parcelas pagas']:.1%} das parcelas pagas, atraso médio {melhor['Atraso medio (dias)']}d.")
+                    st.error(f"⚠️ **Mais inadimplente:** {p_label} — eficiência {pior['Eficiencia %']:.1%}, "
+                             f"{pior['% Aberto 90+']:.1%} do aberto em 90+, atraso médio {pior['Atraso medio (dias)']}d.")
+
+        colP1, colP2 = st.columns(2)
+        with colP1:
+            age_prof = build_payment_profile(movimentos, ["faixa_idade"])
+            render_perfil_pagamento("Por faixa etária", age_prof, ["faixa_idade"])
+        with colP2:
+            genage_prof = build_payment_profile(movimentos, ["genero_cat", "faixa_idade"])
+            render_perfil_pagamento("Por sexo + faixa etária", genage_prof, ["genero_cat", "faixa_idade"])
+        seg_prof = build_payment_profile(movimentos, ["nome_estabelecimento_norm"])
+        if seg_prof is not None and not seg_prof.empty:
+            seg_prof = seg_prof.rename(columns={"nome_estabelecimento_norm": "Segmento"})
+            render_perfil_pagamento("Por segmento (estabelecimento)", seg_prof, ["Segmento"])
+
+        st.markdown("---")
+        st.subheader("Inadimplência vs Recebimento por faixa de valor do contrato")
+        st.caption("Quais faixas de VALOR tendem a MAIS recebimento e a MAIS inadimplência (vencido 90+).")
+
+        def render_coorte(titulo, coorte, label_cols):
+            st.markdown(f"##### {titulo}")
+            if coorte is None or coorte.empty:
+                st.info("Sem dados para esta dimensão.")
+                return
+            view = coorte.copy()
+            for col in ["Recebido_geral", "Vencido", "Atraso_90", "Inadimplencia"]:
+                view[col] = view[col].round(0)
+            view["% Inadimplencia"] = (view["% Inadimplencia"] * 100).round(1)
+            show(view)
+            if len(coorte) > 1:
+                xcol = label_cols[-1] if label_cols else coorte.columns[0]
+                label_lbl = " + ".join(label_cols) if label_cols else "Grupo"
+                cdf = coorte.copy()
+                cdf["Recebido_geral"] = cdf["Recebido_geral"].round(0)
+                cdf["Inadimplencia"] = cdf["Inadimplencia"].round(0)
+                cdf["_x"] = cdf[xcol].astype(str)
+                fig_c = px.bar(cdf, x="_x", y=["Recebido_geral", "Inadimplencia"],
+                               barmode="group", color_discrete_sequence=SEQUENCE,
+                               title=f"Recebido vs Inadimplência ({label_lbl})")
+                fig_c.update_layout(height=320, xaxis_tickangle=-20,
+                                    xaxis_title=label_lbl, yaxis_title="R$")
+                st.plotly_chart(fig_c, use_container_width=True, config={"displayModeBar": False})
+            mais_rec = top_coorte(coorte, "Recebido_geral", label_cols)
+            mais_inad = top_coorte(coorte, "Inadimplencia", label_cols)
+            maior_risco = top_coorte(coorte, "% Inadimplencia", label_cols)
+            if mais_rec:
+                st.success("💰 **Mais recebimento (geral):** " +
+                           " • ".join(f"{l} (R${v:,.0f})" for l, v in mais_rec))
+            if mais_inad:
+                st.error("⚠️ **Mais inadimplência em valor:** " +
+                         " • ".join(f"{l} (R${v:,.0f})" for l, v in mais_inad))
+            if maior_risco:
+                st.warning("📛 **Maior risco (% da carteira em inadimplência):** " +
+                           " • ".join(f"{l} ({v:.1%})" for l, v in maior_risco))
+
+        colC1, colC2 = st.columns(2)
+        with colC1:
+            valor_coorte = build_coorte_valor_contrato(contratos)
+            if valor_coorte is not None and not valor_coorte.empty:
+                render_coorte("Por faixa de valor do contrato", valor_coorte, ["Faixa Valor"])
+        with colC2:
+            valor_profile_r = build_perfil_valor_contrato(contratos)
+            if valor_profile_r is not None and not valor_profile_r.empty:
+                vcr = valor_profile_r.copy()
+                vcr["Default_%"] = (vcr["Default_%"] * 100).round(1)
+                show(vcr[["Faixa Valor", "Contratos", "Clientes", "Valor_total",
+                          "Recebido", "Aberto", "Vencido", "Default_%"]])
+                faixa_mais_risco = valor_profile_r.loc[valor_profile_r["Default_%"].idxmax()]
+                st.warning(f"📛 **Maior default 90d (risco):** {faixa_mais_risco['Faixa Valor']} "
+                           f"({faixa_mais_risco['Default_%']:.1%} dos contratos)")
+            else:
+                st.info("Sem dados para esta dimensão.")
+
+        st.markdown("---")
+        st.subheader("Estratégia de valor inicial do contrato")
+        st.caption("Quanto oferecer inicialmente a um cliente conforme seu perfil, e como escalar conforme o relacionamento.")
+
+        regras_estr = pd.DataFrame([
+            {"Perfil": "Novo", "Valor inicial": "30% do teto", "Escalonamento": "+25% a cada contrato pago em dia",
+             "Observação": "Cliente novo, sem histórico de pagamento"},
+            {"Perfil": "Risco", "Valor inicial": "25% do teto", "Escalonamento": "+20% a cada contrato pago em dia",
+             "Observação": "Histórico com inadimplência 90+"},
+            {"Perfil": "Recorrente", "Valor inicial": "55% do teto", "Escalonamento": "+25% a cada contrato pago em dia",
+             "Observação": "Relação recorrente, sem default"},
+            {"Perfil": "Confiável", "Valor inicial": "75% do teto", "Escalonamento": "+25% a cada contrato pago em dia",
+             "Observação": "Relação sólida, ≥2 contratos pagos"},
+        ])
+        show(regras_estr)
+
+        st.markdown("##### Simulador de valor inicial")
+        clientes_disp = sorted(clientes["id"].astype(int).tolist()) if clientes is not None and len(clientes) else []
+        sel_id = st.selectbox("Escolha um cliente (por id)", clientes_disp) if clientes_disp else None
+        req_val = st.number_input("Valor que o cliente precisa (R$)", min_value=100.0, value=3000.0, step=100.0)
+        if sel_id is not None:
+            perfil = perfil_cliente(contratos, sel_id)
+            rec = recomendar_valor_contrato(perfil, valor_solicitado=req_val)
+            st.write(f"**Perfil do cliente #{sel_id}:** {perfil['n_contratos']} contrato(s), "
+                     f"default 90d = {perfil['default']}, recebimento médio = "
+                     f"{perfil['receb_pct']:.1%}" if perfil["receb_pct"] is not None else
+                     f"**Perfil do cliente #{sel_id}:** sem histórico (cliente novo).")
+            st.info(f"**Classificação de risco:** 🎯 {rec['classe']} — {rec['descricao']}")
+            st.success(f"💡 **Valor inicial sugerido:** R$ {rec['valor_inicial']:,.0f} "
+                       f"({rec['pct_inicial']:.0%} do teto de R$ {rec['teto']:,.0f})")
+            st.caption("Plano de escalonamento (conforme cada contrato é pago em dia):")
+            plano_txt = "\n".join(
+                f"- **Etapa {p['etapa']}:** até R$ {p['capacidade']:,.0f} ({p['pct_teto']:.0%} do teto) — "
+                f"quando {p['condicao']}" for p in rec["plano"])
+            st.markdown(plano_txt)
+
+        st.markdown("---")
+        st.subheader("Simulador de viabilidade por perfil")
+        st.caption("Verifique se um perfil (sexo, idade, segmento, valor) tende à inadimplência e se é viável conceder o contrato.")
+
+        genero_opts = ["Todos", "Masculino", "Feminino"]
+        segmentos_opts = ["Sem segmento"] + sorted(
+            movimentos["nome_estabelecimento_norm"].dropna().unique().astype(str))
+
+        cvin1, cvin2, cvin3, cvin4 = st.columns(4)
+        with cvin1:
+            s_genero = st.selectbox("Sexo", genero_opts, index=0)
+        with cvin2:
+            s_idade = st.number_input("Idade (anos)", min_value=16, max_value=90, value=26, step=1)
+        with cvin3:
+            s_segmento = st.selectbox("Segmento", segmentos_opts, index=0)
+        with cvin4:
+            s_valor = st.number_input("Valor do contrato (R$)", min_value=100.0, value=3000.0, step=100.0)
+
+        res = analisar_viabilidade_perfil(movimentos, contratos,
+                                          genero=s_genero, idade=s_idade,
+                                          segmento=s_segmento, valor=s_valor)
+
+        colv1, colv2 = st.columns([1, 1])
+        with colv1:
+            st.metric("Amostra comparável (clientes)", f"{res['amostra_clientes']}")
+            st.metric("Contratos comparáveis", f"{res['amostra_contratos']}")
+            st.metric("Eficiência de pagamento",
+                      f"{res['eficiencia']:.1%}" if res["eficiencia"] is not None else "n/d")
+            st.metric("Inadimplência (% do movimentado)",
+                      f"{res['inadimplencia_pct']:.1%}" if res["inadimplencia_pct"] is not None else "n/d")
+        with colv2:
+            st.metric("Default 90d na base", f"{res['default_base_pct']:.1%}"
+                      if res["default_base_pct"] is not None else "n/d")
+            st.metric("Inadimplência grave 90+ (do vencido)", f"{res['grave_90_pct']:.1%}"
+                      if res["grave_90_pct"] is not None else "n/d")
+            if res["tendencia"] == "Alta":
+                st.error(f"🚨 **Tendência: {res['tendencia']} à inadimplência**")
+            elif res["tendencia"] == "Média":
+                st.warning(f"⚠️ **Tendência: {res['tendencia']} à inadimplência**")
+            elif res["tendencia"] == "Baixa":
+                st.success(f"🟢 **Tendência: {res['tendencia']} à inadimplência**")
+            else:
+                st.info(f"**Tendência: {res['tendencia']}**")
+
+        st.markdown("**Veredito de viabilidade:**")
+        if res["tendencia"] == "Alta":
+            st.error(f"❌ {res['veredito']}")
+        elif res["tendencia"] == "Média":
+            st.warning(f"🟠 {res['veredito']}")
+        elif res["tendencia"] == "Baixa":
+            st.success(f"✅ {res['veredito']}")
+        else:
+            st.info(res["veredito"])
+
+        if res["valor_inicial_sugerido"]:
+            st.info(f"💡 **Valor inicial recomendado para este perfil:** R$ {res['valor_inicial_sugerido']:,.0f} "
+                    f"de um total de R$ {s_valor:,.0f} solicitado.")
+
+        if res["eficiencia"] is not None and movimentos is not None and len(movimentos):
+            geral = movimentos[~movimentos["dtvenc"].isna()].copy()
+            gen_rec = float(geral["valorrecebido"].sum())
+            gen_ab = float(geral.loc[~geral["status_pago"], "areceber"].sum())
+            gen_ef = gen_rec / (gen_rec + gen_ab) if (gen_rec + gen_ab) > 0 else None
+            if gen_ef is not None:
+                bar_df = pd.DataFrame({
+                    "Grupo": ["Perfil selecionado", "Carteira geral"],
+                    "Eficiência %": [res["eficiencia"] * 100, gen_ef * 100],
+                })
+                fig_vb = px.bar(bar_df, x="Grupo", y="Eficiência %", color="Grupo",
+                                color_discrete_sequence=SEQUENCE, text="Eficiência %",
+                                title="Eficiência: Perfil selecionado vs Carteira geral")
+                fig_vb.update_traces(texttemplate="%{text:.1f}%", textposition="outside")
+                fig_vb.update_layout(height=320, showlegend=False)
+                st.plotly_chart(fig_vb, use_container_width=True, config={"displayModeBar": False})
+
     # =========================================================================
     # TAB 8 - VIABILIDADE & LUCRO
     # =========================================================================
-    with tab_viabilidade:
+    elif aba == "Viabilidade & Lucro":
         st.subheader("💰 Viabilidade Financeira: Lucro vs Risco")
         st.caption("Responde: quanto tive de lucro? quanto por mes? vale o investimento e risco pela margem?")
 
@@ -2640,7 +3317,7 @@ def main():
     # =========================================================================
     # TAB 9 - MODELOS PREDITIVOS
     # =========================================================================
-    with tab_modelos:
+    elif aba == "Modelos Preditivos":
         st.subheader("🤖 Modelos Preditivos")
         
         if not SKLEARN_AVAILABLE:
@@ -2859,7 +3536,7 @@ def main():
     # =========================================================================
     # TAB 10 - VISUALIZACOES AVANCADAS
     # =========================================================================
-    with tab_viz:
+    elif aba == "Visualizacoes":
         st.subheader("📊 Visualizacoes Avancadas")
         
         st.markdown("### 1️⃣ Sankey Diagram - Fluxo de Status")
@@ -3000,7 +3677,7 @@ def main():
     # =========================================================================
     # TAB 11 - DADOS
     # =========================================================================
-    with tab_dados:
+    elif aba == "Dados":
         st.subheader("Dados brutos")
         if st.checkbox("Mostrar movimentacoes completas", value=False):
             show(movimentos)
