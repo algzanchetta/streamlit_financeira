@@ -261,14 +261,14 @@ def classificar_estabelecimento(name: str):
     x = _normalizar_texto(name)
 
     regras = [
-        ("TRANSPORTE", ["UBER", "MOTO TAXI", "MOTOTAXI", "MOTORISTA", "MOTORISTA APP", "ENTREGADOR", "DELIVERY", "VIAGEM", "ONIBUS", "LOZAMO"]),
-        ("ALIMENTAÇÃO", ["PEIXARIA", "PEIXE", "ACOUGUE", "ACOUQUE", "FRUTARIA", "VERDURAS", "QUITANDA", "SORVETERIA", "SORVETE", "ACAI", "PIZZARIA", "PIZZA", "ESPETINHO", "ESPETARIA", "PADARIA", "PANIFICADORA", "SALGADO", "SALGADOS", "CONFEITARIA", "BOLO", "DOCES", "CAFETERIA", "CAFE", "RESTAURANTE", "COMIDA", "LANCHONETE", "LANCHE", "BAR", "BUTECO", "PUB"]),
-        ("BELEZA", ["SALAO", "BELEZA", "BARBEARIA", "BARBEIRO", "UNHA", "MANICURE", "DEPIL", "BRONZE", "TATUAGEM"]),
-        ("TECNOLOGIA", ["CELULAR", "CELULARES", "INFORMATICA", "ELETRONICA", "ELETROTECNICO", "ELETRONICO"]),
-        ("AUTOMOTIVO", ["BORRACHARIA", "FUNILARIA", "LAVA JATO", "LAVAJATO", "MECANICA", "OFICINA", "MOTO", "MOTOS"]),
-        ("CONSTRUÇÃO", ["SERRALHERIA", "VIDRACARIA", "VIDROS", "REFRIGERACAO", "CLIMATIZACAO", "PEDREIRO", "OBRAS", "CONSTRUCAO", "CHAVEIRO"]),
-        ("COMÉRCIO", ["GAS", "OTICA", "OPTICA", "MERCADO", "MERCADINHO", "SUPERMERCADO", "CONVENIENCIA", "ROUPA", "MODA", "SAPATO", "CALCADOS", "SEMIJOIA", "PERFUME", "VARIEDADES", "MOVEIS", "FILTROS", "LIMPEZA"]),
-        ("HOSPEDAGEM", ["HOTEL", "PENSAO"]),
+        ("TRANSPORTE", ["UBER", "MOTO TAXI", "MOTOTAXI", "MOTORISTA", "MOTORISTA APP", "ENTREGADOR", "DELIVERY", "VIAGEM", "ONIBUS", "LOZAMO", "TAXI", "APP"]),
+        ("ALIMENTAÇÃO", ["PEIXARIA", "PEIXE", "ACOUGUE", "ACOUQUE", "FRUTARIA", "VERDURAS", "QUITANDA", "SORVETERIA", "SORVETE", "ACAI", "PIZZARIA", "PIZZA", "ESPETINHO", "ESPETARIA", "PADARIA", "PANIFICADORA", "SALGADO", "SALGADOS", "CONFEITARIA", "BOLO", "DOCES", "CAFETERIA", "CAFE", "RESTAURANTE", "COMIDA", "LANCHONETE", "LANCHE", "BAR", "BUTECO", "PUB", "FAST FOOD", "KIBAB"]),
+        ("BELEZA", ["SALAO", "BELEZA", "BARBEARIA", "BARBEIRO", "UNHA", "MANICURE", "DEPIL", "BRONZE", "TATUAGEM", "PENTEADO", "MAQUIAGEM", "ESTETICA"]),
+        ("TECNOLOGIA", ["CELULAR", "CELULARES", "INFORMATICA", "ELETRONICA", "ELETROTECNICO", "ELETRONICO", "COMPUTADOR", "NOTEBOOK", "TABLET", "SMARTPHONE", "ASSISTENCIA"]),
+        ("AUTOMOTIVO", ["BORRACHARIA", "FUNILARIA", "LAVA JATO", "LAVAJATO", "MECANICA", "OFICINA", "MOTO", "MOTOS", "AUTO PECAS", "PNEUS", "PNEU", "PINTURA", "ELETRO AUTO"]),
+        ("CONSTRUÇÃO", ["SERRALHERIA", "VIDRACARIA", "VIDROS", "REFRIGERACAO", "CLIMATIZACAO", "PEDREIRO", "OBRAS", "CONSTRUCAO", "CHAVEIRO", "MATERIAIS", "MADEIRAS", "FERREIRA", "PISO", "REVESTIMENTO"]),
+        ("COMÉRCIO", ["GAS", "OTICA", "OPTICA", "MERCADO", "MERCADINHO", "SUPERMERCADO", "CONVENIENCIA", "ROUPA", "MODA", "SAPATO", "CALCADOS", "SEMIJOIA", "PERFUME", "VARIEDADES", "MOVEIS", "FILTROS", "LIMPEZA", "FARMACIA", "PET SHOP", "PETSHOP", "PAPELARIA", "BOUTIQUE", "JOIAS", "COSMETICOS", "ARTESANATO", "AQUARIO", "FLORICULTURA", "FLORES"]),
+        ("HOSPEDAGEM", ["HOTEL", "PENSAO", "HOSTEL", "PENSÃO"]),
     ]
 
     for categoria, tokens in regras:
@@ -892,6 +892,25 @@ def build_vintage(movimentos, contratos):
             })
     return pd.DataFrame(rows)
 
+def build_segment_summary(movimentos, dimension="subcategoria_estabelecimento"):
+    """Resumo agregando por categoria/subcategoria/segmento para uso em gráficos e análise."""
+    if dimension not in movimentos.columns:
+        dimension = "nome_estabelecimento_norm" if "nome_estabelecimento_norm" in movimentos.columns else None
+    if dimension is None:
+        return pd.DataFrame(columns=["Segmento", "Recebido", "Em_aberto", "Total", "Clientes", "Eficiencia %"])
+
+    base = movimentos[[dimension, "valorrecebido", "areceber", "status_pago", "idcliente"]].copy()
+    base[dimension] = base[dimension].fillna("OUTROS")
+    recebido = base.groupby(dimension, dropna=False)["valorrecebido"].sum().rename("Recebido")
+    em_aberto = base.loc[~base["status_pago"]].groupby(dimension, dropna=False)["areceber"].sum().rename("Em_aberto")
+    clientes = base.groupby(dimension, dropna=False)["idcliente"].nunique().rename("Clientes")
+    seg = pd.concat([recebido, em_aberto, clientes], axis=1).fillna(0).reset_index().rename(columns={dimension: "Segmento"})
+    seg["Total"] = seg["Recebido"] + seg["Em_aberto"]
+    seg["Eficiencia %"] = seg["Recebido"] / seg["Total"].replace(0, np.nan)
+    seg = seg.sort_values("Total", ascending=False).reset_index(drop=True)
+    return seg
+
+
 def build_concentration(movimentos):
     cli = movimentos.groupby("idcliente")["areceber"].sum().reset_index()
     cli.columns = ["idcliente", "valor"]
@@ -976,7 +995,7 @@ def build_action_plan_prescritivo(aberto_90, open_80_89, vencido, open_next_30, 
                      "Detalhe": "Sem valores criticos.", "Impacto estimado": "-"})
     return pd.DataFrame(rows)
 
-def build_new_contract_stats(contratos, start_date, end_date):
+def build_new_contract_stats(contratos, start_date, end_date, dimension=None):
     start = pd.Timestamp(start_date).normalize()
     end = pd.Timestamp(end_date).normalize()
     recent = contratos[
@@ -984,7 +1003,18 @@ def build_new_contract_stats(contratos, start_date, end_date):
         (contratos["dtinicio"] >= start) &
         (contratos["dtinicio"] <= end) &
         (contratos["dtinicio"].dt.dayofweek < 6)
-    ]
+    ].copy()
+
+    if dimension is not None and dimension in recent.columns:
+        recent["segmento_dim"] = recent[dimension].fillna("OUTROS")
+        by_dim = recent.groupby("segmento_dim").agg(
+            Contratos=("id", "count"),
+            Valor_originado=("valor", "sum"),
+            Ticket_medio=("valor", "mean"),
+        ).reset_index().rename(columns={"segmento_dim": "Segmento"})
+        by_dim = by_dim.sort_values(["Contratos", "Valor_originado"], ascending=[False, False]).reset_index(drop=True)
+        return by_dim
+
     def summarize(counts):
         counts = counts.astype(float)
         return {"Media": counts.mean(), "Maximo": int(counts.max()), "Minimo": int(counts.min())}
@@ -1692,6 +1722,45 @@ def build_perfil_valor_contrato(contratos):
     df = df.sort_values("Valor_total", ascending=False)
     return df
 
+def build_perfil_por_faixas(contratos, passo=500, faixas_selecionadas=None):
+    """Por faixa de valor em intervalos de 'passo' reais (ex.: R$500), mede risco e inadimplência.
+
+    Permite filtrar apenas as faixas escolhidas (ex.: 500 a 5000). Retorna DataFrame com
+    colunas de faixa, abertura (lo/hi), recebimento, inadimplência e default."""
+    cc = contratos.dropna(subset=["valor"]).copy()
+    if cc.empty:
+        return pd.DataFrame()
+    lo_val = int(cc["valor"].min() // passo) * passo
+    hi_val = int(cc["valor"].max() // passo + 1) * passo
+    bins = list(range(lo_val, hi_val + 1, passo))
+    if len(bins) < 2:
+        return pd.DataFrame()
+    cc["Faixa Valor"] = pd.cut(cc["valor"], bins=bins, right=False, include_lowest=True)
+    g = cc.groupby("Faixa Valor", observed=True)
+    df = g.agg(
+        Contratos=("id", "count"),
+        Clientes=("idcliente", "nunique"),
+        Valor_total=("valor", "sum"),
+        Recebido=("total_recebido", "sum"),
+        Aberto=("total_aberto", "sum"),
+        Vencido=("vencido_valor", "sum"),
+        Default_90d=("default_90d", "sum"),
+    ).reset_index()
+    df["Faixa Valor"] = df["Faixa Valor"].astype(str)
+    inter = cc["Faixa Valor"].cat.categories
+    lo_map = {str(iv): iv.left for iv in inter}
+    hi_map = {str(iv): iv.right for iv in inter}
+    df["lo"] = df["Faixa Valor"].map(lo_map)
+    df["hi"] = df["Faixa Valor"].map(hi_map)
+    df["Default_%"] = df["Default_90d"] / df["Contratos"].replace(0, np.nan)
+    df["% Inadimplencia"] = df["Vencido"] / (df["Aberto"] + df["Recebido"]).replace(0, np.nan)
+    if faixas_selecionadas:
+        df = df[df["Faixa Valor"].isin(faixas_selecionadas)]
+    for col in ["Valor_total", "Recebido", "Aberto", "Vencido"]:
+        df[col] = df[col].round(2)
+    df = df.sort_values("lo")
+    return df
+
 def build_coorte_valor_contrato(contratos):
     """Coorte por faixa de valor de contrato."""
     cc = contratos.dropna(subset=["valor"]).copy()
@@ -1807,7 +1876,7 @@ def _idade_para_faixa(idade):
     return str(label)
 
 def analisar_viabilidade_perfil(movimentos, contratos, genero=None, idade=None,
-                                segmento=None, valor=None):
+                                segmento=None, valor=None, categoria=None, subcategoria=None):
     """Simula a viabilidade de conceder um contrato a um perfil."""
     faixa_idade = _idade_para_faixa(idade)
     mo = movimentos[~movimentos["dtvenc"].isna()].copy()
@@ -1819,6 +1888,10 @@ def analisar_viabilidade_perfil(movimentos, contratos, genero=None, idade=None,
         amostra = amostra[amostra["faixa_idade"] == faixa_idade]
     if segmento and segmento != "Sem segmento":
         amostra = amostra[amostra["nome_estabelecimento_norm"] == segmento]
+    if categoria and categoria != "Todas":
+        amostra = amostra[amostra["categoria_estabelecimento"] == categoria]
+    if subcategoria and subcategoria != "Todas":
+        amostra = amostra[amostra["subcategoria_estabelecimento"] == subcategoria]
 
     n_clientes = amostra["idcliente"].nunique()
     n_contratos = amostra["idcontrato"].nunique()
@@ -1882,6 +1955,8 @@ def analisar_viabilidade_perfil(movimentos, contratos, genero=None, idade=None,
         "idade": idade,
         "faixa_idade": faixa_idade or "Todas",
         "segmento": segmento or "Sem segmento",
+        "categoria": categoria,
+        "subcategoria": subcategoria,
         "valor_solicitado": valor,
         "amostra_contratos": n_contratos,
         "amostra_clientes": n_clientes,
@@ -2392,7 +2467,6 @@ def gerar_relatorio_geral(ctx, paginas_selecionadas):
         "Risco & Cobranca": gerar_relatorio_risco,
         "Agentes": gerar_relatorio_agentes,
         "Carteira": gerar_relatorio_carteira,
-        "Controle": gerar_relatorio_controle,
         "Rentabilidade": gerar_relatorio_rentabilidade,
         "Viabilidade & Lucro": gerar_relatorio_viabilidade,
     }
@@ -2612,7 +2686,7 @@ def main():
     )
     if scope.startswith("Por página"):
         paginas_opcoes = ["Visao Geral", "Fluxo de Caixa", "Risco & Cobranca", "Agentes",
-                          "Carteira", "Controle", "Rentabilidade", "Viabilidade & Lucro"]
+                          "Carteira", "Rentabilidade", "Viabilidade & Lucro"]
         paginas_sel = st.sidebar.multiselect("Páginas do relatório", paginas_opcoes, default=paginas_opcoes)
     else:
         paginas_sel = []
@@ -2636,7 +2710,8 @@ def main():
         st.info("📊 **Modo de Demonstração:** Exibindo dados gerados aleatoriamente com Faker. Os dados são para fins de demonstração apenas.")
 
     paginas = ["Visao Geral", "Fluxo de Caixa", "Risco & Cobranca", "Agentes", "Carteira",
-               "Controle", "Rentabilidade", "Viabilidade & Lucro", "Modelos Preditivos",
+               "Rentabilidade", "Viabilidade & Lucro", "Simulador Financeiro",
+               "Modelos Preditivos",
                "Visualizacoes", "Dados"]
     aba = st.sidebar.radio("📑 Navegação", paginas, index=0, key="nav_aba")
 
@@ -2979,6 +3054,56 @@ def main():
                               legend=dict(orientation="h", y=1.15))
             st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 
+            st.markdown("##### Novos contratos por categoria / subcategoria")
+            seg_new = []
+            if "categoria_estabelecimento" in new_ct.columns:
+                seg_new.append(("categoria_estabelecimento", "Categoria"))
+            if "subcategoria_estabelecimento" in new_ct.columns:
+                seg_new.append(("subcategoria_estabelecimento", "Subcategoria"))
+            for col, label in seg_new:
+                by_seg = build_new_contract_stats(new_ct, stats_start, stats_end, dimension=col)
+                if by_seg.empty:
+                    continue
+                by_seg = by_seg.rename(columns={"Valor_originado": "Valor originado (R$)", "Ticket_medio": "Ticket medio (R$)"})
+                by_seg["Valor originado (R$)"] = by_seg["Valor originado (R$)"].round(2)
+                by_seg["Ticket medio (R$)"] = by_seg["Ticket medio (R$)"].round(2)
+                st.markdown(f"**{label}**")
+                show(by_seg.head(10))
+
+        st.markdown("---")
+        st.subheader("Resumo por categoria e subcategoria")
+        if "categoria_estabelecimento" in movimentos.columns and "subcategoria_estabelecimento" in movimentos.columns:
+            seg_cart = movimentos[["categoria_estabelecimento", "subcategoria_estabelecimento", "valorrecebido", "areceber", "status_pago", "idcliente"]].copy()
+            seg_cart["subcategoria_estabelecimento"] = seg_cart["subcategoria_estabelecimento"].fillna("OUTROS")
+            seg_cart["categoria_estabelecimento"] = seg_cart["categoria_estabelecimento"].fillna("OUTROS")
+            seg_tbl = seg_cart.groupby(["categoria_estabelecimento", "subcategoria_estabelecimento"], dropna=False).agg(
+                Recebido=("valorrecebido", "sum"),
+                Em_aberto=("areceber", lambda s: s[~seg_cart.loc[s.index, "status_pago"]].sum()),
+                Clientes=("idcliente", "nunique"),
+            ).reset_index()
+            seg_tbl["Em_aberto"] = seg_tbl.apply(lambda r: seg_cart.loc[(seg_cart["categoria_estabelecimento"] == r["categoria_estabelecimento"]) & (seg_cart["subcategoria_estabelecimento"] == r["subcategoria_estabelecimento"]) & (~seg_cart["status_pago"]), "areceber"].sum(), axis=1)
+            seg_tbl["Total"] = seg_tbl["Recebido"] + seg_tbl["Em_aberto"]
+            seg_tbl["Eficiencia %"] = seg_tbl["Recebido"] / seg_tbl["Total"].replace(0, np.nan)
+            seg_tbl = seg_tbl.sort_values("Total", ascending=False).reset_index(drop=True)
+            seg_tbl["Eficiencia %"] = (seg_tbl["Eficiencia %"] * 100).round(1)
+            seg_tbl[["Recebido", "Em_aberto", "Total"]] = seg_tbl[["Recebido", "Em_aberto", "Total"]].round(2)
+            seg_tbl = seg_tbl.rename(columns={"categoria_estabelecimento": "Categoria", "subcategoria_estabelecimento": "Subcategoria"})
+            show(seg_tbl[["Categoria", "Subcategoria", "Recebido", "Em_aberto", "Total", "Clientes", "Eficiencia %"]])
+
+            fig_seg = px.bar(
+                seg_tbl.sort_values("Total", ascending=False).head(15),
+                x="Subcategoria",
+                y="Total",
+                color="Categoria",
+                title="Top subcategorias por valor total",
+                text="Total",
+            )
+            fig_seg.update_traces(texttemplate="R$ %{text:,.0f}", textposition="outside")
+            fig_seg.update_layout(height=380, xaxis_tickangle=-25)
+            st.plotly_chart(fig_seg, use_container_width=True, config={"displayModeBar": False})
+        else:
+            st.info("Dados de categoria/subcategoria não disponíveis para o filtro atual.")
+
         st.markdown("---")
         st.subheader("Maturacao por coorte (vintage)")
         vintage = build_vintage(movimentos, contratos)
@@ -3002,59 +3127,18 @@ def main():
 
         st.markdown("---")
         st.subheader("Segmentos (estabelecimento)")
-        seg = movimentos.groupby("nome_estabelecimento_norm").agg(
-            Recebido=("valorrecebido", "sum"),
-            Em_aberto=("areceber", lambda s: s[movimentos.loc[s.index, "status_pago"] == False].sum()),
-            Clientes=("idcliente", "nunique"),
-        ).reset_index().rename(columns={"nome_estabelecimento_norm": "Segmento"})
-        seg["Total"] = seg["Recebido"] + seg["Em_aberto"]
-        seg["Eficiencia %"] = seg["Recebido"] / seg["Total"].replace(0, 1)
-        seg = seg.sort_values("Total", ascending=False)
-        view_seg = seg.copy()
-        view_seg["Eficiencia %"] = (view_seg["Eficiencia %"] * 100).round(1)
-        view_seg[["Recebido", "Em_aberto", "Total"]] = view_seg[["Recebido", "Em_aberto", "Total"]].round(2)
-        show(view_seg)
-
-    # =========================================================================
-    # TAB 6 - CONTROLE (CORRIGIDA)
-    # =========================================================================
-    elif aba == "Controle":
-        st.subheader("Controle de carteira - contratos e exclusoes")
-        
-        # Usar contratos filtrados ou todos dependendo do contexto
-        contratos_para_analise = contratos if period_active else contratos_total
-        
-        st.markdown("##### Resumo por situacao (portfolio filtrado)")
-        status_df = contratos_para_analise.groupby("status").agg(
-            Contratos=("id", "count"),
-            Principal=("valor", "sum"),
-            A_receber=("valor_parcelado", "sum"),
-        ).reset_index()
-        status_df["Principal"] = status_df["Principal"].round(2)
-        status_df["A_receber"] = status_df["A_receber"].round(2)
-        st.dataframe(status_df, hide_index=True, use_container_width=True)
-
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Total contratos (validos)", len(contratos_para_analise))
-        c2.metric("Principal total (portfolio)", fmt_brl(contratos_para_analise["valor"].sum()))
-        c3.metric("Principal no periodo", fmt_brl(principal))
-
-        st.markdown("---")
-        st.markdown("##### Contratos excluidos (cancelados sem movimento)")
-        if len(contratos_excluidos) > 0:
-            excl_view = contratos_excluidos[["id", "dtinicio", "dtfim", "status", "valor", "valor_parcelado"]].copy()
-            excl_view["valor"] = excl_view["valor"].round(2)
-            excl_view["valor_parcelado"] = excl_view["valor_parcelado"].fillna(0).round(2)
-            show(excl_view.rename(columns={
-                "id": "Contrato", "dtinicio": "Dt inicio", "dtfim": "Dt fim",
-                "status": "Status", "valor": "Principal (R$)", "valor_parcelado": "A receber (R$)",
-            }))
-            st.caption(f"Total excluido: {fmt_brl(contratos_excluidos['valor'].sum())} em {len(contratos_excluidos)} contratos.")
+        seg_dim = st.selectbox("Agrupar por:", ["subcategoria_estabelecimento", "categoria_estabelecimento", "nome_estabelecimento_norm"], index=0)
+        seg = build_segment_summary(movimentos, dimension=seg_dim)
+        if seg.empty:
+            st.info("Sem dados para o agrupamento selecionado.")
         else:
-            st.info("Nenhum contrato excluido.")
+            view_seg = seg.copy()
+            view_seg["Eficiencia %"] = (view_seg["Eficiencia %"] * 100).round(1)
+            view_seg[["Recebido", "Em_aberto", "Total"]] = view_seg[["Recebido", "Em_aberto", "Total"]].round(2)
+            show(view_seg)
 
     # =========================================================================
-    # TAB 7 - RENTABILIDADE
+    # TAB 6 - RENTABILIDADE
     # =========================================================================
     elif aba == "Rentabilidade":
         st.subheader("Rentabilidade do produto")
@@ -3150,10 +3234,37 @@ def main():
         with colP2:
             genage_prof = build_payment_profile(movimentos, ["genero_cat", "faixa_idade"])
             render_perfil_pagamento("Por sexo + faixa etária", genage_prof, ["genero_cat", "faixa_idade"])
-        seg_prof = build_payment_profile(movimentos, ["nome_estabelecimento_norm"])
-        if seg_prof is not None and not seg_prof.empty:
-            seg_prof = seg_prof.rename(columns={"nome_estabelecimento_norm": "Segmento"})
-            render_perfil_pagamento("Por segmento (estabelecimento)", seg_prof, ["Segmento"])
+        seg_cat = movimentos.groupby(["categoria_estabelecimento", "subcategoria_estabelecimento"], dropna=False).agg(
+            Recebido=("valorrecebido", "sum"),
+            Em_aberto=("areceber", lambda s: s[~movimentos.loc[s.index, "status_pago"]].sum()),
+            Atraso_90=("areceber", lambda s: s[movimentos.loc[s.index, "atraso_90"]].sum()),
+            Clientes=("idcliente", "nunique"),
+        ).reset_index()
+        seg_cat["Categoria"] = seg_cat["categoria_estabelecimento"].fillna("OUTROS")
+        seg_cat["Subcategoria"] = seg_cat["subcategoria_estabelecimento"].fillna("OUTROS")
+        seg_cat["Total"] = seg_cat["Recebido"] + seg_cat["Em_aberto"]
+        seg_cat["Eficiencia %"] = seg_cat["Recebido"] / seg_cat["Total"].replace(0, np.nan)
+        seg_cat["Inadimplencia"] = seg_cat["Atraso_90"]
+        seg_cat = seg_cat.sort_values("Total", ascending=False).reset_index(drop=True)
+        if not seg_cat.empty:
+            seg_view = seg_cat[["Categoria", "Subcategoria", "Recebido", "Em_aberto", "Inadimplencia", "Eficiencia %"]].copy()
+            seg_view["Eficiencia %"] = (seg_view["Eficiencia %"] * 100).round(1)
+            seg_view[["Recebido", "Em_aberto", "Inadimplencia"]] = seg_view[["Recebido", "Em_aberto", "Inadimplencia"]].round(2)
+            st.markdown("##### Segmentos por categoria e subcategoria")
+            show(seg_view.head(20))
+
+            seg_plot = seg_cat.sort_values("Total", ascending=False).head(12).copy()
+            seg_plot["Inadimplencia"] = seg_plot["Inadimplencia"].fillna(0)
+            fig_seg = px.bar(
+                seg_plot,
+                x="Subcategoria",
+                y=["Recebido", "Inadimplencia"],
+                barmode="group",
+                color_discrete_sequence=[COLORS["azul"], COLORS["vermelho"]],
+                title="Recebido vs inadimplência por subcategoria",
+            )
+            fig_seg.update_layout(height=340, xaxis_tickangle=-20, legend=dict(orientation="h", y=1.12))
+            st.plotly_chart(fig_seg, use_container_width=True, config={"displayModeBar": False})
 
         st.markdown("---")
         st.subheader("Inadimplência vs Recebimento por faixa de valor do contrato")
@@ -3254,22 +3365,26 @@ def main():
         st.caption("Verifique se um perfil (sexo, idade, segmento, valor) tende à inadimplência e se é viável conceder o contrato.")
 
         genero_opts = ["Todos", "Masculino", "Feminino"]
-        segmentos_opts = ["Sem segmento"] + sorted(
-            movimentos["nome_estabelecimento_norm"].dropna().unique().astype(str))
+        categorias_opts = ["Todas"] + sorted(movimentos["categoria_estabelecimento"].dropna().unique().astype(str))
+        subcategorias_opts = ["Todas"] + sorted(movimentos["subcategoria_estabelecimento"].dropna().unique().astype(str))
 
-        cvin1, cvin2, cvin3, cvin4 = st.columns(4)
+        cvin1, cvin2, cvin3, cvin4, cvin5 = st.columns(5)
         with cvin1:
             s_genero = st.selectbox("Sexo", genero_opts, index=0)
         with cvin2:
             s_idade = st.number_input("Idade (anos)", min_value=16, max_value=90, value=26, step=1)
         with cvin3:
-            s_segmento = st.selectbox("Segmento", segmentos_opts, index=0)
+            s_categoria = st.selectbox("Categoria", categorias_opts, index=0)
         with cvin4:
+            s_subcategoria = st.selectbox("Subcategoria", subcategorias_opts, index=0)
+        with cvin5:
             s_valor = st.number_input("Valor do contrato (R$)", min_value=100.0, value=3000.0, step=100.0)
 
         res = analisar_viabilidade_perfil(movimentos, contratos,
                                           genero=s_genero, idade=s_idade,
-                                          segmento=s_segmento, valor=s_valor)
+                                          categoria=s_categoria if s_categoria != "Todas" else None,
+                                          subcategoria=s_subcategoria if s_subcategoria != "Todas" else None,
+                                          valor=s_valor)
 
         colv1, colv2 = st.columns([1, 1])
         with colv1:
@@ -3469,6 +3584,245 @@ def main():
         cc2.metric("Lucro Liquido Ajustado", fmt_brl(lucro_liquido_cenario), f"{(lucro_liquido_cenario - viab['lucro_liquido_ajustado']):+.0f} vs atual")
         cc3.metric("Cobertura do Risco", f"{cobertura_cenario:.1f}x", f"{(cobertura_cenario - viab['cobertura_risco']):+.1f}x vs atual")
         cc4.metric("Status do Cenario", "✅ Saudavel" if cobertura_cenario >= 2 else ("⚠️ Apertado" if cobertura_cenario >= 1 else "❌ Em risco"))
+
+        st.markdown("---")
+        st.subheader("Análise por faixas de valor (passo de R$ 500)")
+        st.caption("Agrupa contratos por faixa de R$ 500 e permite escolher quais faixas analisar "
+                   "(ex.: analisar a inadimplência de R$ 500 a R$ 5.000).")
+
+        faixas_full = build_perfil_por_faixas(contratos, passo=500)
+        if faixas_full is not None and not faixas_full.empty:
+            all_faixas = faixas_full["Faixa Valor"].tolist()
+            colF1, colF2, colF3 = st.columns([2, 2, 1])
+            with colF1:
+                fronteira_min = int(faixas_full["lo"].min())
+                fronteira_max = int(faixas_full["hi"].max())
+                sel_min = st.number_input("Faixa inicial (R$)", min_value=fronteira_min,
+                                          max_value=fronteira_max, value=min(fronteira_min, 500), step=500,
+                                          key="faixa_min")
+                sel_min = int(sel_min // 500) * 500
+            with colF2:
+                sel_max = st.number_input("Faixa final (R$)", min_value=fronteira_min,
+                                          max_value=fronteira_max,
+                                          value=min(max(fronteira_max, 5000), fronteira_max) if fronteira_max >= 5000 else fronteira_max,
+                                          step=500, key="faixa_max")
+                sel_max = int(sel_max // 500) * 500
+            with colF3:
+                passo_faixa = st.selectbox("Passo (R$)", [100, 500, 1000], index=1, key="faixa_passo")
+
+            faixas_filtradas = [f for f in all_faixas
+                                if faixas_full.loc[faixas_full["Faixa Valor"] == f, "lo"].iloc[0] >= sel_min
+                                and faixas_full.loc[faixas_full["Faixa Valor"] == f, "hi"].iloc[0] <= sel_max]
+
+            fdf = faixas_full[faixas_full["Faixa Valor"].isin(faixas_filtradas)].copy()
+            if fdf.empty:
+                st.info("Nenhuma faixa no intervalo selecionado.")
+            else:
+                fview = fdf.copy()
+                fview["Default_%"] = (fview["Default_%"] * 100).round(1)
+                fview["% Inadimplencia"] = (fview["% Inadimplencia"] * 100).round(1)
+                show(fview[["Faixa Valor", "Contratos", "Clientes", "Valor_total",
+                            "Recebido", "Aberto", "Vencido", "Default_%", "% Inadimplencia"]]
+                     .rename(columns={"Default_%": "Default 90d (%)", "% Inadimplencia": "Inadimplência (%)"}))
+
+                colfg1, colfg2 = st.columns([1, 1])
+                with colfg1:
+                    fig_fx = px.bar(fdf, x="Faixa Valor", y="Valor_total",
+                                    color="Default_%",
+                                    color_continuous_scale="RdYlGn_r",
+                                    title="Valor originado por faixa (cor = taxa de default)")
+                    fig_fx.update_layout(height=360, xaxis_tickangle=-45)
+                    st.plotly_chart(fig_fx, use_container_width=True, config={"displayModeBar": False})
+
+                st.markdown("##### Inadimplência e recebimento por faixa de valor (linha inteira)")
+                fplot = fdf.copy()
+                fplot["Inadimplência %"] = (fplot["% Inadimplencia"] * 100).fillna(0)
+                fplot["Recebido (R$)"] = fplot["Recebido"]
+                fig_fl = go.Figure()
+                fig_fl.add_trace(go.Scatter(x=fplot["Faixa Valor"], y=fplot["Inadimplência %"],
+                                            mode="lines+markers+text", name="Inadimplência (%)",
+                                            text=[f"{v:.1f}%" for v in fplot["Inadimplência %"]],
+                                            textposition="top center", line=dict(color=COLORS["vermelho"], width=3),
+                                            yaxis="y"))
+                fig_fl.add_trace(go.Scatter(x=fplot["Faixa Valor"], y=fplot["Recebido (R$)"],
+                                            mode="lines+markers", name="Recebido (R$)",
+                                            line=dict(color=COLORS["azul"], width=2), yaxis="y2"))
+                fig_fl.update_layout(
+                    title="Evolução por faixa de valor (inadimplência e recebimento)",
+                    height=420, xaxis_tickangle=-45,
+                    yaxis=dict(title="Inadimplência (%)"),
+                    yaxis2=dict(title="Recebido (R$)", overlaying="y", side="right"),
+                    legend=dict(orientation="h", y=1.12))
+                st.plotly_chart(fig_fl, use_container_width=True, config={"displayModeBar": False})
+
+                if fdf["Default_%"].notna().any():
+                    pior = fdf.loc[fdf["Default_%"].idxmax()]
+                    st.warning(f"📛 **Faixa com maior risco (default 90d):** {pior['Faixa Valor']} "
+                               f"({pior['Default_%']:.1%} dos contratos)")
+                if fdf["% Inadimplencia"].notna().any():
+                    pior_inad = fdf.loc[fdf["% Inadimplencia"].idxmax()]
+                    st.error(f"⚠️ **Faixa com maior inadimplência (% do movimentado):** {pior_inad['Faixa Valor']} "
+                             f"({pior_inad['% Inadimplencia']:.1%})")
+        else:
+            st.info("Sem dados de valor de contrato disponíveis.")
+
+    # =========================================================================
+    # TAB - SIMULADOR FINANCEIRO (previsão de juros / crescimento de capital)
+    # =========================================================================
+    elif aba == "Simulador Financeiro":
+        st.subheader("📈 Simulador Financeiro — Projeção de Capital da Carteira")
+        st.caption("Simula o crescimento do capital sob diferentes cenários de rentabilidade, "
+                   "inadimplência, custos, impostos e reinvestimento. Independente dos dados do banco.")
+
+        with st.expander("Como ler esta aba", expanded=False):
+            st.markdown("""
+            **Esta aba projeta quanto seu capital pode crescer mês a mês.**
+
+            - **Cenário Ideal:** juros compostos puros — `VF = VP × (1 + taxa)^n`. Todo o retorno é reinvestido.
+            - **Cenário Realista:** o retorno bruto é reduzido por inadimplência, perdas, impostos e custos
+              operacionais, e apenas uma fração é efetivamente reinvestida.
+            - **Sensibilidade:** mostra o capital final variando taxa × inadimplência.
+            - **Ponto de equilíbrio:** maior inadimplência que o negócio suporta antes de parar de crescer.
+            """)
+
+        ci1, ci2, ci3, ci4 = st.columns(4)
+        cap_inicial = ci1.number_input("Capital inicial (R$)", min_value=1000.0, value=250000.0, step=10000.0,
+                                       key="sim_cap")
+        taxa_bruta = ci2.number_input("Retorno bruto mensal (%)", min_value=0.1, value=8.0, step=0.5,
+                                      key="sim_taxa") / 100.0
+        n_meses = ci3.number_input("Meses de projeção", min_value=1, max_value=60, value=24, step=1,
+                                   key="sim_meses")
+        reinv = ci4.number_input("Fração reinvestida (%)", min_value=0, max_value=100, value=100, step=5,
+                                 key="sim_reinv") / 100.0
+
+        cj1, cj2, cj3 = st.columns(3)
+        inad = cj1.number_input("Inadimplência/perdas (% do retorno)", min_value=0.0, value=20.0, step=1.0,
+                                key="sim_inad") / 100.0
+        custos = cj2.number_input("Custos operacionais (% do retorno)", min_value=0.0, value=15.0, step=1.0,
+                                  key="sim_custos") / 100.0
+        impostos = cj3.number_input("Impostos (% do retorno)", min_value=0.0, value=5.0, step=1.0,
+                                    key="sim_imp") / 100.0
+
+        # --- Calcula cenários mês a mês ---
+        taxa_ideal = taxa_bruta * reinv
+        cap_ideal = []
+        cap_real = []
+        juros_linha = []
+        perdas_linha = []
+        custos_linha = []
+        meses = list(range(0, n_meses + 1))
+
+        for m in range(n_meses + 1):
+            cap_ideal.append(cap_inicial * (1 + taxa_ideal) ** m)
+            if m == 0:
+                cap_real.append(cap_inicial)
+                juros_linha.append(0.0)
+                perdas_linha.append(0.0)
+                custos_linha.append(0.0)
+            else:
+                cap_prev = cap_real[-1]
+                juros = cap_prev * taxa_bruta
+                perda = juros * inad
+                custo = juros * custos
+                imp = juros * impostos
+                juros_linha.append(juros)
+                perdas_linha.append(perda + imp)
+                custos_linha.append(custo)
+                liquido = juros - perda - custo - imp
+                cap_real.append(cap_prev + liquido * reinv)
+
+        df_sim = pd.DataFrame({
+            "Mês": meses,
+            "Capital Ideal (R$)": cap_ideal,
+            "Capital Realista (R$)": cap_real,
+            "Juros no mês (R$)": juros_linha,
+            "Perdas + Impostos (R$)": perdas_linha,
+            "Custos (R$)": custos_linha,
+        })
+        for col in ["Capital Ideal (R$)", "Capital Realista (R$)", "Juros no mês (R$)",
+                    "Perdas + Impostos (R$)", "Custos (R$)"]:
+            df_sim[col] = df_sim[col].round(2)
+
+        st.markdown("---")
+        capt1, capt2 = st.columns(2)
+        capt1.metric("Capital final — cenário ideal", fmt_brl(cap_ideal[-1]))
+        capt2.metric("Capital final — cenário realista", fmt_brl(cap_real[-1]))
+
+        # --- Marcos de capital ---
+        marcos = {500000: "R$ 500 mil", 750000: "R$ 750 mil", 1000000: "R$ 1 milhão",
+                  2000000: "R$ 2 milhões", 5000000: "R$ 5 milhões"}
+        lin_real = pd.Series(cap_real)
+        lin_ideal = pd.Series(cap_ideal)
+        st.markdown("**Mês em que o capital atinge cada marco (— = não atinge no período):**")
+        cols_marco = st.columns(4)
+        marco_items = list(marcos.items())
+        for i, (mvalor, mnome) in enumerate(marco_items):
+            mes_real = lin_real[lin_real >= mvalor].index.min()
+            mes_ideal = lin_ideal[lin_ideal >= mvalor].index.min()
+            with cols_marco[i % 4]:
+                st.markdown(f"**{mnome}**")
+                st.markdown(f"- Realista: `mês {mes_real}`" if pd.notna(mes_real) else "- Realista: não atinge")
+                st.markdown(f"- Ideal: `mês {mes_ideal}`" if pd.notna(mes_ideal) else "- Ideal: não atinge")
+
+        st.markdown("---")
+        st.markdown("### Evolução do capital")
+        fig_sim = go.Figure()
+        fig_sim.add_trace(go.Scatter(x=df_sim["Mês"], y=df_sim["Capital Ideal (R$)"],
+                                     mode="lines+markers", name="Cenário ideal (juros compostos)",
+                                     line=dict(color=COLORS["azul"], width=2)))
+        fig_sim.add_trace(go.Scatter(x=df_sim["Mês"], y=df_sim["Capital Realista (R$)"],
+                                     mode="lines+markers", name="Cenário realista (com perdas/custos)",
+                                     line=dict(color=COLORS["laranja"], width=2)))
+        fig_sim.update_layout(title=f"Projeção de capital — {n_meses} meses (início R$ {cap_inicial:,.0f})",
+                              height=400, xaxis_title="Mês", yaxis_title="Capital (R$)",
+                              legend=dict(orientation="h", y=1.12))
+        st.plotly_chart(fig_sim, use_container_width=True, config={"displayModeBar": False})
+
+        with st.expander("Ver tabela mês a mês", expanded=False):
+            show(df_sim)
+
+        st.markdown("---")
+        st.markdown("### Análise de sensibilidade (capital final após o período)")
+        st.caption("Varia o retorno bruto × inadimplência para ver como o capital final se comporta.")
+        sens_taxas = [0.03, 0.05, 0.06, 0.07, 0.08, 0.09, 0.10, 0.12]
+        sens_inads = [0.0, 0.10, 0.20, 0.30, 0.40]
+
+        sens_rows = []
+        for t in sens_taxas:
+            for iad in sens_inads:
+                c = cap_inicial
+                for _ in range(n_meses):
+                    j = c * t
+                    c = c + (j - j * iad - j * custos - j * impostos) * reinv
+                sens_rows.append({"Taxa mensal": f"{t:.1%}", "Inadimplência": f"{iad:.0%}",
+                                  "Capital final (R$)": c})
+        df_sens = pd.DataFrame(sens_rows)
+        df_sens["Capital final (R$)"] = df_sens["Capital final (R$)"].round(0).astype(int)
+
+        fig_sens = px.density_heatmap(
+            df_sens, x="Inadimplência", y="Taxa mensal", z="Capital final (R$)",
+            color_continuous_scale="RdYlGn_r", title="Capital final (R$) — taxa × inadimplência")
+        fig_sens.update_layout(height=420)
+        st.plotly_chart(fig_sens, use_container_width=True, config={"displayModeBar": False})
+
+        with st.expander("Ver tabela de sensibilidade", expanded=False):
+            show(df_sens)
+
+        st.markdown("---")
+        st.markdown("### Qual taxa de inadimplência máxima o negócio aguenta?")
+        st.caption("Maior inadimplência com a qual o capital ainda cresce (líquido de custos e impostos) "
+                   "considerando a fração reinvestida.")
+        custo_total_pct = custos + impostos
+        if reinv > 0 and (1 - custo_total_pct) > 0:
+            inad_max = max(0.0, 1 - custo_total_pct / reinv)
+            st.success(f"**O capital deixa de crescer quando a inadimplência + perdas supera "
+                       f"`{(reinv - custo_total_pct):.1%}` do retorno bruto.** "
+                       f"Ou seja, a inadimplência máxima sustentável é **aproximadamente {inad_max:.0%}** "
+                       f"do retorno bruto (considerando {custos:.0%} de custos e {impostos:.0%} de impostos "
+                       f"sobre o retorno, reinvestindo {reinv:.0%}).")
+        else:
+            st.info("Não é possível calcular o ponto de equilíbrio com os parâmetros atuais "
+                    "(ajuste a fração reinvestida e os custos).")
 
     # =========================================================================
     # TAB 9 - MODELOS PREDITIVOS
