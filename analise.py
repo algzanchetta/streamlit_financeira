@@ -455,6 +455,11 @@ def load_data(use_fake=False):
     clientes = ensure_datetime(clientes, ["dtinicio", "dtfim", "dtatualizacao"])
     clientes["idade"] = pd.to_numeric(clientes.get("idade"), errors="coerce")
     clientes["idade"] = clientes["idade"].where(clientes["idade"] > 0, np.nan)
+    if "data_nascimento" in clientes.columns:
+        nasc = pd.to_datetime(clientes["data_nascimento"], errors="coerce")
+        idade_calc = (pd.Timestamp(date.today()) - nasc).dt.days // 365
+        clientes["idade"] = clientes["idade"].fillna(idade_calc)
+    clientes["idade"] = clientes["idade"].where(clientes["idade"] > 0, np.nan)
     clientes["genero"] = clientes.get("genero").astype(str).str.strip()
     clientes["genero_cat"] = clientes["genero"].replace({"1": "Masculino", "0": "Feminino"}).fillna("Outro")
     
@@ -486,7 +491,7 @@ def load_data(use_fake=False):
     contratos["juros_previstos"] = contratos["valor_parcelado"] - contratos["valor"]
     
     contratos = contratos.merge(
-        clientes[["id", "cliente", "genero_cat", "faixa_idade", "avaliacao", "nome_estabelecimento"]],
+        clientes[["id", "cliente", "genero_cat", "idade", "faixa_idade", "avaliacao", "nome_estabelecimento"]],
         left_on="idcliente", right_on="id", how="left", suffixes=("", "_cliente"),
     )
     if "usuario" in usuarios.columns:
@@ -531,7 +536,7 @@ def load_data(use_fake=False):
     movimentos["atraso_90"] = movimentos["vencido"] & (movimentos["dias_atraso"] >= 90)
 
     movimentos = movimentos.merge(
-        clientes[["id", "cliente", "genero_cat", "faixa_idade", "avaliacao", "nome_estabelecimento"]],
+        clientes[["id", "cliente", "genero_cat", "idade", "faixa_idade", "avaliacao", "nome_estabelecimento"]],
         left_on="idcliente", right_on="id", how="left", suffixes=("", "_cliente"),
     )
     movimentos["nome_estabelecimento_original"] = movimentos["nome_estabelecimento"].fillna("Desconhecido")
@@ -1151,6 +1156,214 @@ def build_viability_analysis(contratos, movimentos, pdd_total, period_start=None
         "margem_lucro_pct": margem_lucro_pct,
     }
 
+
+def build_capital_evolution(contratos, movimentos, start_date, end_date, max_contract_value=None):
+    """Monta a evolucao mensal do capital originado, devolvido e ainda exposto."""
+    co = contratos.copy()
+    mo = movimentos.copy()
+    if max_contract_value is not None:
+        co = co[co["valor"] <= max_contract_value].copy()
+    mo = mo[mo["idcontrato"].isin(co["id"].unique())].copy()
+
+    start = pd.Timestamp(start_date).normalize()
+    end = pd.Timestamp(end_date).normalize() + pd.Timedelta(days=1)
+    months = pd.period_range(start.to_period("M"), (end - pd.Timedelta(days=1)).to_period("M"), freq="M")
+
+    origin = co[co["dtinicio"].notna() & (co["dtinicio"] >= start) & (co["dtinicio"] < end)].copy()
+    origin["mes"] = origin["dtinicio"].dt.to_period("M")
+    invested = origin.groupby("mes")["valor"].sum().reindex(months, fill_value=0)
+
+    receipts = mo[mo["dtrecebimento"].notna() & (mo["dtrecebimento"] >= start) & (mo["dtrecebimento"] < end)].copy()
+    receipts["mes"] = receipts["dtrecebimento"].dt.to_period("M")
+    receipts["principal_devolvido"] = receipts["valorrecebido"] * receipts["frac_principal"]
+    receipts["juros_devolvidos"] = receipts["valorrecebido"] * receipts["juros_frac"]
+    by_month = receipts.groupby("mes").agg(
+        recebido=("valorrecebido", "sum"),
+        capital_devolvido=("principal_devolvido", "sum"),
+        juros_devolvidos=("juros_devolvidos", "sum"),
+        descontos=("desconto", "sum"),
+    ).reindex(months, fill_value=0)
+
+    result = pd.DataFrame({"mes": months})
+    result["capital_investido"] = invested.to_numpy()
+    for column in ["recebido", "capital_devolvido", "juros_devolvidos", "descontos"]:
+        result[column] = by_month[column].to_numpy()
+    result["capital_exposto"] = (result["capital_investido"] - result["capital_devolvido"]).cumsum()
+    result["lucro_caixa"] = result["juros_devolvidos"] - result["descontos"]
+    result["lucro_acumulado"] = result["lucro_caixa"].cumsum()
+    result["mes_ts"] = result["mes"].dt.to_timestamp()
+    result["mes_label"] = result["mes"].astype(str)
+
+    open_mov = mo[~mo["status_pago"]].copy()
+    open_principal = (open_mov["areceber"] * open_mov["frac_principal"]).sum()
+    open_total = open_mov["areceber"].sum()
+    open_interest = open_total - open_principal
+    today_ts = pd.Timestamp(date.today())
+    next_30 = open_mov[
+        open_mov["dtvenc"].notna() &
+        (open_mov["dtvenc"] >= today_ts) &
+        (open_mov["dtvenc"] <= today_ts + pd.Timedelta(days=30))
+    ].copy()
+    next_30_total = next_30["areceber"].sum()
+    next_30_principal = (next_30["areceber"] * next_30["frac_principal"]).sum()
+    next_30_interest = next_30_total - next_30_principal
+    open_by_threshold = {
+        threshold: open_mov.loc[open_mov["dias_atraso"] >= threshold, "areceber"].sum()
+        for threshold in [30, 60, 90]
+    }
+    pdd_rates = compute_lgd_observada(mo)
+    open_mov["taxa_pdd"] = np.select(
+        [open_mov["dias_atraso"] < 60, open_mov["dias_atraso"] < 90],
+        [pdd_rates.get("31-60 dias", 0.10), pdd_rates.get("61-90 dias", 0.30)],
+        default=pdd_rates.get("90+ dias", 0.50),
+    )
+    pdd_by_threshold = {
+        threshold: (open_mov.loc[open_mov["dias_atraso"] >= threshold, "areceber"] *
+                    open_mov.loc[open_mov["dias_atraso"] >= threshold, "taxa_pdd"]).sum()
+        for threshold in [30, 60, 90]
+    }
+    pdd = pdd_by_threshold[90]
+    total_principal_returned = receipts["principal_devolvido"].sum()
+    total_interest_returned = receipts["juros_devolvidos"].sum()
+    total_discounts = receipts["desconto"].sum()
+    profit = total_interest_returned - total_discounts
+    capital_invested = origin["valor"].sum()
+    capital_to_recover = max(capital_invested - total_principal_returned, 0)
+    interest_after_capital_completion = total_interest_returned - capital_to_recover
+    interest_after_capital_pct = (
+        interest_after_capital_completion / capital_invested * 100
+        if capital_invested else 0
+    )
+    real_profit = profit - pdd
+    result_with_open_balance = real_profit + open_interest
+    profit_by_threshold = {
+        threshold: {
+            "open": open_by_threshold[threshold],
+            "pdd": pdd_by_threshold[threshold],
+            "profit_after_pdd": profit - pdd_by_threshold[threshold],
+            "margin_pct": ((profit - pdd_by_threshold[threshold]) / total_principal_returned * 100
+                           if total_principal_returned else 0),
+        }
+        for threshold in [30, 60, 90]
+    }
+    return {
+        "monthly": result,
+        "total_invested": capital_invested,
+        "total_received": receipts["valorrecebido"].sum(),
+        "principal_returned": total_principal_returned,
+        "interest_returned": total_interest_returned,
+        "discounts": total_discounts,
+        "open_principal": open_principal,
+        "open_total": open_total,
+        "open_interest": open_interest,
+        "next_30_total": next_30_total,
+        "next_30_principal": next_30_principal,
+        "next_30_interest": next_30_interest,
+        "capital_to_recover": capital_to_recover,
+        "interest_after_capital_completion": interest_after_capital_completion,
+        "interest_after_capital_pct": interest_after_capital_pct,
+        "open_30": open_by_threshold[30],
+        "open_60": open_by_threshold[60],
+        "open_90": open_by_threshold[90],
+        "pdd": pdd,
+        "pdd_30": pdd_by_threshold[30],
+        "pdd_60": pdd_by_threshold[60],
+        "pdd_90": pdd_by_threshold[90],
+        "profit": profit,
+        "profit_after_pdd": real_profit,
+        "real_profit": real_profit,
+        "result_with_open_balance": result_with_open_balance,
+        "margin_pct": profit / total_principal_returned * 100 if total_principal_returned else 0,
+        "roi_invested_pct": profit / origin["valor"].sum() * 100 if origin["valor"].sum() else 0,
+        "profit_by_threshold": profit_by_threshold,
+        "contract_count": len(origin),
+    }
+
+
+def build_customer_payment_analysis(contratos, movimentos):
+    """Analisa pagadores Vigente e recuperacao acumulada dos Finalizado."""
+    if contratos.empty:
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+
+    contract_base = contratos[[
+        "id", "idcliente", "status", "valor", "frac_principal", "genero_cat", "cliente"
+    ]].copy().rename(columns={"id": "idcontrato"})
+
+    movimentos = movimentos.copy()
+    movimentos["atraso_atual"] = np.where(
+        movimentos["vencido"] & ~movimentos["status_pago"], movimentos["dias_atraso"], 0
+    )
+
+    if "principal_recebido" in movimentos:
+        movement_agg = movimentos.groupby("idcontrato", as_index=False).agg(
+            total_recebido=("valorrecebido", "sum"),
+            total_desconto=("desconto", "sum"),
+            principal_recebido=("principal_recebido", "sum"),
+            principal_em_aberto=("areceber", "sum"),
+            maior_atraso_atual=("atraso_atual", "max"),
+        )
+    else:
+        movement_agg = movimentos.groupby("idcontrato", as_index=False).agg(
+            total_recebido=("valorrecebido", "sum"),
+            total_desconto=("desconto", "sum"),
+            principal_em_aberto=("areceber", "sum"),
+            maior_atraso_atual=("atraso_atual", "max"),
+        ).merge(contract_base[["idcontrato", "frac_principal"]], on="idcontrato", how="left")
+        movement_agg["principal_recebido"] = movement_agg["total_recebido"] * movement_agg["frac_principal"]
+
+    base = contract_base.merge(movement_agg, on="idcontrato", how="left")
+    for column in ["principal_recebido", "principal_em_aberto", "maior_atraso_atual"]:
+        base[column] = pd.to_numeric(base[column], errors="coerce").fillna(0)
+    base["cliente"] = base["cliente"].fillna("Cliente sem nome")
+    base["genero_cat"] = base["genero_cat"].fillna("Outro")
+    base["principal_recuperado"] = base["principal_recebido"].clip(lower=0)
+    base["principal_a_recuperar"] = (base["valor"] - base["principal_recuperado"]).clip(lower=0)
+    base_vigente = base[base["status"] == "Vigente"].copy()
+    base_vigente["status_pagamento"] = np.where(
+        base_vigente["maior_atraso_atual"] >= 31, "Inadimplente", "Pagante"
+    )
+    base_vigente["principal_recuperado"] = base_vigente["principal_recebido"].clip(lower=0)
+    base_vigente["principal_a_recuperar"] = (base_vigente["valor"] - base_vigente["principal_recuperado"]).clip(lower=0)
+
+    clientes = base_vigente.groupby(["idcliente", "cliente", "genero_cat"], as_index=False).agg(
+        status_pagamento=("status_pagamento", lambda s: "Inadimplente" if (s == "Inadimplente").any() else "Pagante"),
+        maior_atraso=("maior_atraso_atual", "max"),
+        contratos=("idcontrato", "nunique"),
+        principal_contratado=("valor", "sum"),
+        principal_recuperado=("principal_recuperado", "sum"),
+        principal_a_recuperar=("principal_a_recuperar", "sum"),
+        principal_vigente=("valor", "sum"),
+        principal_vigente_recuperado=("principal_recuperado", "sum"),
+    )
+    clientes["vigente_retorno_principal_pct"] = (clientes["principal_vigente_recuperado"] / clientes["principal_vigente"].replace(0, np.nan)).fillna(0)
+    clientes["retorno_principal_pct"] = (clientes["principal_recuperado"] / clientes["principal_contratado"].replace(0, np.nan)).fillna(0)
+
+    resumo = clientes.groupby(["genero_cat", "status_pagamento"], as_index=False).agg(
+        clientes=("idcliente", "nunique"),
+        principal_contratado=("principal_contratado", "sum"),
+        principal_recuperado=("principal_recuperado", "sum"),
+        principal_a_recuperar=("principal_a_recuperar", "sum"),
+        principal_vigente=("principal_vigente", "sum"),
+        principal_vigente_recuperado=("principal_vigente_recuperado", "sum"),
+    )
+    total_por_genero = resumo.groupby("genero_cat")["clientes"].transform("sum")
+    resumo["pct_clientes"] = resumo["clientes"] / total_por_genero.replace(0, np.nan)
+    resumo["retorno_principal_pct"] = (resumo["principal_recuperado"] / resumo["principal_contratado"].replace(0, np.nan)).fillna(0)
+    resumo["vigente_retorno_principal_pct"] = (resumo["principal_vigente_recuperado"] / resumo["principal_vigente"].replace(0, np.nan)).fillna(0)
+    resumo = resumo.sort_values(["genero_cat", "status_pagamento"]).reset_index(drop=True)
+
+    finalizados = base[base["status"] == "Finalizado"].copy()
+    finalizados["principal_recuperado"] = finalizados["principal_recebido"].clip(lower=0)
+    finalizados["principal_residual"] = (finalizados["valor"] - finalizados["principal_recuperado"]).clip(lower=0)
+    finalizados["retorno_principal_pct"] = (finalizados["principal_recuperado"] / finalizados["valor"].replace(0, np.nan)).fillna(0)
+    finalizados = finalizados.rename(columns={"idcontrato": "id_contrato"})
+    finalizados = finalizados[[
+        "id_contrato", "idcliente", "cliente", "genero_cat", "valor", "total_recebido",
+        "total_desconto", "principal_em_aberto", "principal_recuperado", "principal_residual",
+        "retorno_principal_pct"
+    ]].rename(columns={"principal_em_aberto": "total_aberto"}).sort_values("id_contrato")
+    return clientes, resumo, finalizados
+
 # =============================================================================
 # MODELOS PREDITIVOS
 # =============================================================================
@@ -1722,6 +1935,110 @@ def build_perfil_valor_contrato(contratos):
     df = df.sort_values("Valor_total", ascending=False)
     return df
 
+
+def build_profile_score_report(contratos, movimentos, clientes):
+    """Pontua perfis de idade, genero, valor e segmento para novos contratos."""
+    if contratos.empty or movimentos.empty:
+        return {}
+
+    contract_metrics = movimentos.groupby("idcontrato", as_index=False).agg(
+        recebido=("valorrecebido", "sum"),
+        aberto=("areceber", "sum"),
+        atraso_atual=("dias_atraso", lambda s: s[movimentos.loc[s.index, "vencido"] & ~movimentos.loc[s.index, "status_pago"]].max() if (movimentos.loc[s.index, "vencido"] & ~movimentos.loc[s.index, "status_pago"]).any() else 0),
+    )
+    segmento_coluna = "subcategoria_estabelecimento" if "subcategoria_estabelecimento" in contratos.columns else "nome_estabelecimento"
+    base = contratos[["id", "idcliente", "valor", "status", "frac_principal", "genero_cat", segmento_coluna]].copy()
+    base = base.rename(columns={segmento_coluna: "segmento"})
+    base = base.merge(contract_metrics, left_on="id", right_on="idcontrato", how="left")
+    base = base.merge(clientes[["id", "idade", "faixa_idade", "genero_cat"]], left_on="idcliente", right_on="id", how="left", suffixes=("", "_cadastro"))
+    for col in ["recebido", "aberto", "atraso_atual", "idade"]:
+        base[col] = pd.to_numeric(base[col], errors="coerce").fillna(0)
+    base["principal_recuperado"] = base["recebido"] * base["frac_principal"]
+    base["retorno_principal"] = (base["principal_recuperado"] / base["valor"].replace(0, np.nan)).fillna(0).clip(0, 1)
+    base["resultado_risco"] = np.where(
+        base["status"] == "Vigente", np.where(base["atraso_atual"] >= 31, 0.0, 1.0),
+        base["retorno_principal"],
+    )
+    score_geral = 100 * (0.60 * base["resultado_risco"].mean() + 0.40 * base["retorno_principal"].mean())
+    base["faixa_valor"] = pd.cut(base["valor"], bins=FAIXAS_VALOR_CONTRATO, right=False, include_lowest=True).astype(str)
+    base["faixa_idade"] = base["faixa_idade"].astype(object).fillna("Sem idade")
+    base["segmento"] = base["segmento"].fillna("OUTROS").replace("nan", "OUTROS")
+    base["genero_idade"] = base["genero_cat"].fillna("Outro").astype(str) + " | " + base["faixa_idade"].astype(str)
+    base["genero_valor"] = base["genero_cat"].fillna("Outro").astype(str) + " | " + base["faixa_valor"].astype(str)
+    base["idade_valor"] = base["faixa_idade"].astype(str) + " | " + base["faixa_valor"].astype(str)
+
+    dimensoes = {
+        "Idade": "faixa_idade",
+        "Genero": "genero_cat",
+        "Valor do contrato": "faixa_valor",
+        "Segmento": "segmento",
+        "Genero e idade": "genero_idade",
+        "Genero e valor": "genero_valor",
+        "Idade e valor": "idade_valor",
+    }
+    resultado = {}
+    for titulo, coluna in dimensoes.items():
+        agrupado = base.groupby(coluna, dropna=False, observed=True).agg(
+            contratos=("id", "nunique"),
+            clientes=("idcliente", "nunique"),
+            retorno_principal=("retorno_principal", "mean"),
+            resultado_risco=("resultado_risco", "mean"),
+            principal=("valor", "sum"),
+        ).reset_index().rename(columns={coluna: "Perfil"})
+        agrupado["score"] = (100 * (0.60 * agrupado["resultado_risco"] + 0.40 * agrupado["retorno_principal"])).round(1)
+        agrupado["confianca"] = (agrupado["contratos"] / (agrupado["contratos"] + 5)).round(2)
+        agrupado["score_observado"] = agrupado["score"]
+        agrupado["score"] = (
+            agrupado["score"] * agrupado["confianca"] + score_geral * (1 - agrupado["confianca"])
+        ).round(1)
+        agrupado["classificacao"] = np.select(
+            [agrupado["score"] >= 75, agrupado["score"] < 50],
+            ["Recomendado", "Evitar"], default="Atencao",
+        )
+        agrupado["retorno_principal"] = (agrupado["retorno_principal"] * 100).round(1)
+        agrupado["resultado_risco"] = (agrupado["resultado_risco"] * 100).round(1)
+        resultado[titulo] = agrupado.sort_values(["score", "contratos"], ascending=[False, False]).reset_index(drop=True)
+    return resultado
+
+
+def build_profile_recommendation_summary(profile_scores):
+    """Resume os melhores e piores perfis para orientar novas concessoes."""
+    if not profile_scores:
+        return {"ideais": [], "recusados": [], "observacao": "Sem dados suficientes."}
+
+    candidatos = []
+    for dimensao, tabela in profile_scores.items():
+        if tabela.empty:
+            continue
+        for _, row in tabela.iterrows():
+            candidatos.append({
+                "dimensao": dimensao,
+                "perfil": str(row["Perfil"]),
+                "score": float(row["score"]),
+                "score_observado": float(row["score_observado"]),
+                "confianca": float(row["confianca"]),
+                "contratos": int(row["contratos"]),
+                "clientes": int(row["clientes"]),
+                "retorno_principal": float(row["retorno_principal"]),
+                "classificacao": str(row["classificacao"]),
+            })
+
+    recomendados = [r for r in candidatos if r["score"] >= 75 and r["confianca"] >= 0.50]
+    recusados = [r for r in candidatos if r["score"] < 50 and r["confianca"] >= 0.50]
+    recomendados = sorted(recomendados, key=lambda r: (r["score"], r["confianca"]), reverse=True)[:5]
+    recusados = sorted(recusados, key=lambda r: (r["score"], -r["confianca"]))[:5]
+
+    if not recomendados:
+        recomendados = sorted(candidatos, key=lambda r: (r["score"], r["confianca"]), reverse=True)[:3]
+    if not recusados:
+        recusados = sorted(candidatos, key=lambda r: (r["score"], -r["confianca"]))[:3]
+
+    return {
+        "ideais": recomendados,
+        "recusados": recusados,
+        "observacao": "Ideal exige score >= 75 e confianca >= 50%; ausencia desses criterios indica perfil para teste controlado, nao aprovacao automatica.",
+    }
+
 def build_perfil_por_faixas(contratos, passo=500, faixas_selecionadas=None):
     """Por faixa de valor em intervalos de 'passo' reais (ex.: R$500), mede risco e inadimplência.
 
@@ -1791,13 +2108,19 @@ def perfil_cliente(contratos, idcliente):
     h = contratos[contratos["idcliente"] == idcliente]
     if h.empty:
         return {"n_contratos": 0, "default": 0, "receb_pct": None,
-                "valor_medio": None, "valor_solicitado": None}
+                "valor_medio": None, "valor_solicitado": None,
+                "n_finalizados": 0, "n_vigentes": 0, "receb_fin_pct": None}
+    fin = h[h["status"].isin(["Finalizado", "Quitado"])]
+    vig = h[h["status"].eq("Vigente")]
     return {
         "n_contratos": int(h["id"].nunique()),
         "default": int(h["default_90d"].sum()),
         "receb_pct": float(h["percentual_recebido"].mean()),
         "valor_medio": float(h["valor"].mean()),
         "valor_solicitado": float(h["valor"].max()),
+        "n_finalizados": int(fin["id"].nunique()),
+        "n_vigentes": int(vig["id"].nunique()),
+        "receb_fin_pct": float(fin["percentual_recebido"].mean()) if len(fin) else None,
     }
 
 def classificar_risco_cliente(perfil):
@@ -1807,10 +2130,12 @@ def classificar_risco_cliente(perfil):
         return "Novo"
     if perfil["default"] > 0:
         return "Risco"
+    n_fin = perfil.get("n_finalizados", 0) or 0
+    rp_fin = perfil.get("receb_fin_pct")
+    if n_fin >= 2 and rp_fin is not None and rp_fin >= 0.8:
+        return "Confiavel"
     rp = perfil["receb_pct"]
-    if rp is None:
-        return "Recorrente"
-    if n >= 2 and rp >= 0.75:
+    if n >= 2 and rp is not None and rp >= 0.75:
         return "Confiavel"
     return "Recorrente"
 
@@ -1819,9 +2144,10 @@ def recomendar_valor_contrato(perfil, valor_solicitado=None, valor_max_teto=None
     risco = classificar_risco_cliente(perfil)
     solicitado = valor_solicitado if valor_solicitado is not None else perfil.get("valor_solicitado")
     base = solicitado if solicitado and solicitado > 0 else (perfil.get("valor_medio") or 0)
-    teto = valor_max_teto if valor_max_teto is not None else base
-    if base <= 0:
-        base = 1000.0
+    historico = max([v for v in (perfil.get("valor_solicitado"), perfil.get("valor_medio")) if v] or [0])
+    teto = valor_max_teto if valor_max_teto is not None else max(base, historico)
+    if teto <= 0:
+        teto = 1000.0
 
     regras = {
         "Novo": dict(ini=0.30, passo=0.25, desc="cliente novo, sem histórico"),
@@ -1832,7 +2158,10 @@ def recomendar_valor_contrato(perfil, valor_solicitado=None, valor_max_teto=None
     regra = regras.get(risco, regras["Novo"])
 
     inicial = round(teto * regra["ini"], 2)
-    limite_fixo = round(teto * 0.75, 2) if teto else inicial
+    if risco in ("Confiavel", "Recorrente") and historico > 0:
+        inicial = max(inicial, round(historico, 2))
+    limite_fixo = max(round(teto * 0.75, 2), inicial) if teto else inicial
+    pct_inicial = (inicial / teto) if teto else regra["ini"]
 
     plano = []
     cap = inicial
@@ -1855,7 +2184,7 @@ def recomendar_valor_contrato(perfil, valor_solicitado=None, valor_max_teto=None
         "descricao": regra["desc"],
         "teto": teto,
         "valor_inicial": inicial,
-        "pct_inicial": regra["ini"],
+        "pct_inicial": pct_inicial,
         "limite_fixo": limite_fixo,
         "plano": plano,
     }
@@ -1884,8 +2213,8 @@ def analisar_viabilidade_perfil(movimentos, contratos, genero=None, idade=None,
 
     if genero and genero != "Todos":
         amostra = amostra[amostra["genero_cat"] == genero]
-    if faixa_idade:
-        amostra = amostra[amostra["faixa_idade"] == faixa_idade]
+    if idade is not None:
+        amostra = amostra[amostra["idade"] == idade]
     if segmento and segmento != "Sem segmento":
         amostra = amostra[amostra["nome_estabelecimento_norm"] == segmento]
     if categoria and categoria != "Todas":
@@ -2014,6 +2343,130 @@ def gerar_relatorio_visao_geral(ctx):
 **Portfólio completo (sem filtro de periodo):**
 - **Total programado:** {fmt_brl_rep(c['programado_total'])} ({len(c['contratos_total'])} contratos)
 - **Total recebido:** {fmt_brl_rep(c['recebido_total'])} | **Total em aberto:** {fmt_brl_rep(c['aberto_total'])} | **PDD total:** {fmt_brl_rep(c['pdd_total'])}"""
+
+def gerar_relatorio_insights(ctx):
+    insights = ctx.get("insights", [])
+    linhas = list(insights)
+    viab = ctx.get("viab", {})
+    mensal = ctx.get("monthly_profit", pd.DataFrame())
+    evolucao = ctx.get("capital_evolution_all", {})
+    if not mensal.empty:
+        lucro_medio = mensal["lucro_bruto"].mean()
+        linhas.append(f"**Reanálise de rentabilidade:** lucro bruto médio mensal de {fmt_brl_rep(lucro_medio)}, com {int((mensal['lucro_bruto'] > 0).sum())} de {len(mensal)} meses positivos.")
+    if viab.get("lucro_liquido_ajustado", 0) < 0:
+        linhas.append(f"**Reanálise de risco:** o lucro ajustado pela PDD está negativo em {fmt_brl_rep(viab.get('lucro_liquido_ajustado', 0))}; novas concessões exigem contenção e cobrança prioritária.")
+    elif viab.get("cobertura_risco", 0) < 2:
+        linhas.append(f"**Reanálise de risco:** a cobertura do risco é de {viab.get('cobertura_risco', 0):.1f}x, abaixo da referência de 2x; revisar margem e descontos.")
+    if evolucao:
+        linhas.append(f"**Reanálise de capital:** {fmt_brl_rep(evolucao.get('open_principal', 0))} permanece exposto e {fmt_brl_rep(evolucao.get('capital_to_recover', 0))} ainda precisa ser recuperado para recompor o principal.")
+    if not linhas:
+        return "### Insights Prescritivos\nSem insights para o filtro atual."
+    return "### Insights Prescritivos\n" + "\n".join(f"- {insight}" for insight in linhas)
+
+def gerar_relatorio_capital(ctx):
+    linhas = ["### Evolução do Capital e Retorno", f"**Período:** {_rep_period(ctx)}"]
+    for nome, evolucao in (("Todos os contratos", ctx["capital_evolution_all"]),
+                           ("Contratos até R$ 5.000", ctx["capital_evolution_5000"])):
+        linhas.extend([
+            f"\n**{nome}**",
+            f"- Capital investido: {fmt_brl(evolucao['total_invested'])} ({evolucao['contract_count']} contratos)",
+            f"- Capital devolvido: {fmt_brl(evolucao['principal_returned'])}",
+            f"- Juros devolvidos: {fmt_brl(evolucao['interest_returned'])}",
+            f"- Juros devolvidos sobre o capital: {evolucao['interest_returned'] / evolucao['principal_returned'] * 100:.1f}%" if evolucao['principal_returned'] else "- Juros devolvidos sobre o capital: 0.0%",
+            f"- Lucro bruto: {fmt_brl(evolucao['profit'])}",
+            f"- Descontos concedidos: {fmt_brl(evolucao['discounts'])}",
+            f"- PDD 90+: {fmt_brl(evolucao['pdd'])}",
+            f"- Lucro após 90+ / lucro real realizado: {fmt_brl(evolucao['real_profit'])}",
+            f"- Margem sobre capital devolvido: {evolucao['margin_pct']:.1f}%",
+            f"- Capital ainda exposto: {fmt_brl(evolucao['open_principal'])}",
+            f"- Capital ainda a recuperar: {fmt_brl(evolucao['capital_to_recover'])}",
+            f"- ROI sobre capital investido: {evolucao['roi_invested_pct']:.1f}%",
+        ])
+    return "\n".join(linhas)
+
+def gerar_relatorio_cobranca_detalhada(ctx):
+    action = build_action_plan_prescritivo(ctx["aberto_90"], ctx["aberto_80_89"], ctx["vencido"],
+                                           ctx["open_next_30"], ctx["pdd"], ctx["eficiencia"])
+    linhas = ["### Plano de Ação e Clientes Prioritários", "\n**Plano de ação:**"]
+    linhas.extend(f"- **{r['Prioridade']}**: {r['Acao']} — {r['Detalhe']}" for _, r in action.iterrows())
+    prio = ctx["prio"]
+    if prio is not None and not prio.empty:
+        linhas.append(f"\n**Clientes prioritários:** {len(prio)}; maiores saldos em aberto:")
+        linhas.extend(f"- {r['Cliente']}: {fmt_brl_rep(r['Valor em aberto'])}, {r['Maior atraso']} ({r['Prioridade']})"
+                      for _, r in prio.head(10).iterrows())
+    else:
+        linhas.append("\nSem clientes prioritários no filtro atual.")
+    return "\n".join(linhas)
+
+def gerar_relatorio_detalhes_carteira(ctx):
+    linhas = ["### Detalhes da Carteira, Perfis e Coortes"]
+    contratos = ctx["contratos"]
+    novos = ctx["new_ct"]
+    linhas.append(f"- Novos contratos no período: {len(novos)}; ticket médio: {fmt_brl_rep(novos['valor'].mean())}" if novos is not None and not novos.empty else "- Novos contratos no período: 0")
+    perfil = build_perfil_valor_contrato(contratos)
+    if not perfil.empty:
+        maior_receb = perfil.loc[perfil["Recebido"].idxmax()]
+        maior_risco = perfil.loc[perfil["Default_%"].idxmax()]
+        linhas.append(f"- Maior recebimento: {maior_receb['Faixa Valor']} ({fmt_brl_rep(maior_receb['Recebido'])}); maior default 90d: {maior_risco['Faixa Valor']} ({maior_risco['Default_%']:.1%})")
+    linhas.append(f"- Perfil por faixa etária: {ctx.get('pag_por_idade', 'ver conclusão executiva')}")
+    linhas.append(f"- Perfil por sexo e faixa etária: {ctx.get('pag_por_sexo_idade', 'ver conclusão executiva')}")
+    linhas.append(f"- Perfil por segmento: {ctx.get('pag_por_segmento', 'ver conclusão executiva')}")
+    return "\n".join(linhas)
+
+
+def gerar_relatorio_pontuacao_perfis(ctx):
+    """Gera o manual operacional de pontuacao para novos contratos."""
+    perfis = ctx.get("profile_score_report", {})
+    recomendacao = ctx.get("profile_recommendation_summary", {})
+    linhas = [
+        "### Pontuacao de Perfis para Novos Contratos",
+        "**Objetivo:** identificar perfis com melhor historico observado para orientar novas concessoes.",
+        "**Nota:** score de 0 a 100. Quanto maior, melhor o desempenho observado.",
+        "**Regra:** 60% resultado de risco + 40% retorno medio do principal.",
+        "**Confiabilidade:** contratos / (contratos + 5). O score final combina o score observado com a media geral conforme o tamanho da amostra.",
+        "**Resultado de risco:** nos contratos Vigente, sem atraso atual de 31 dias ou mais = 100%; com atraso de 31 dias ou mais = 0%. Nos Finalizado, usa-se o percentual de principal recuperado.",
+        "**Faixas:** `Recomendado` >= 75; `Atencao` entre 50 e 74,9; `Evitar` < 50.",
+        "**Cuidado:** grupos com poucos contratos devem ser confirmados antes de ampliar a concessao.",
+    ]
+    linhas.append("\n**Resumo do perfil ideal:**")
+    linhas.extend(
+        f"- {row['dimensao']} = {row['perfil']}: score {row['score']:.1f}, "
+        f"retorno do principal {row['retorno_principal']:.1f}%, "
+        f"{row['contratos']} contratos, confianca {row['confianca']:.0%}."
+        for row in recomendacao.get("ideais", [])
+    )
+    linhas.append("\n**Resumo do perfil recusado ou para analise manual:**")
+    linhas.extend(
+        f"- {row['dimensao']} = {row['perfil']}: score {row['score']:.1f}, "
+        f"retorno do principal {row['retorno_principal']:.1f}%, "
+        f"{row['contratos']} contratos, confianca {row['confianca']:.0%}."
+        for row in recomendacao.get("recusados", [])
+    )
+    linhas.append(f"\n**Orientacao:** {recomendacao.get('observacao', 'Sem dados suficientes.')}")
+    for dimensao in ["Idade", "Genero", "Valor do contrato", "Segmento", "Genero e idade", "Genero e valor", "Idade e valor"]:
+        tabela = perfis.get(dimensao, pd.DataFrame())
+        linhas.append(f"\n**Por {dimensao}:**")
+        if tabela.empty:
+            linhas.append("Sem dados suficientes.")
+            continue
+        melhores = tabela.head(3)
+        linhas.extend(
+            f"- {row['Perfil']}: score {row['score']:.1f} ({row['classificacao']}), "
+            f"retorno do principal {row['retorno_principal']:.1f}%, "
+            f"{int(row['contratos'])} contratos, {int(row['clientes'])} clientes e confianca {row['confianca']:.0%}."
+            for _, row in melhores.iterrows()
+        )
+    return "\n".join(linhas)
+
+def gerar_relatorio_lucro_mensal(ctx):
+    mensal = ctx["monthly_profit"]
+    if mensal.empty:
+        return "### Lucro Mensal\nSem recebimentos no período selecionado."
+    total = mensal["lucro_bruto"].sum()
+    media = mensal["lucro_bruto"].mean()
+    linhas = ["### Lucro Mensal", f"- Lucro acumulado: {fmt_brl_rep(total)}", f"- Média mensal: {fmt_brl_rep(media)}", "\n| Mês | Recebido | Juros | Descontos | Lucro bruto | Margem |\n|---|---:|---:|---:|---:|---:|"]
+    linhas.extend(f"| {r['mes_label']} | {fmt_brl_rep(r['total_recebido'])} | {fmt_brl_rep(r['juros_recebidos'])} | {fmt_brl_rep(r['descontos'])} | {fmt_brl_rep(r['lucro_bruto'])} | {r['margem_lucro_pct']:.1f}% |" for _, r in mensal.iterrows())
+    return "\n".join(linhas)
 
 def gerar_relatorio_fluxo_caixa(ctx):
     c = ctx
@@ -2463,12 +2916,19 @@ def gerar_conclusao_geral(ctx):
 def gerar_relatorio_geral(ctx, paginas_selecionadas):
     geradores = {
         "Visao Geral": gerar_relatorio_visao_geral,
+        "Capital e Retorno": gerar_relatorio_capital,
         "Fluxo de Caixa": gerar_relatorio_fluxo_caixa,
         "Risco & Cobranca": gerar_relatorio_risco,
+        "Cobranca Detalhada": gerar_relatorio_cobranca_detalhada,
         "Agentes": gerar_relatorio_agentes,
         "Carteira": gerar_relatorio_carteira,
+        "Detalhes da Carteira": gerar_relatorio_detalhes_carteira,
+        "Pontuacao de Perfis": gerar_relatorio_pontuacao_perfis,
         "Rentabilidade": gerar_relatorio_rentabilidade,
+        "Lucro Mensal": gerar_relatorio_lucro_mensal,
         "Viabilidade & Lucro": gerar_relatorio_viabilidade,
+        "Insights Prescritivos": gerar_relatorio_insights,
+        "Controle": gerar_relatorio_controle,
     }
     try:
         data_gerado = ctx["hoje"].strftime("%d/%m/%Y")
@@ -2528,7 +2988,15 @@ def main():
         st.sidebar.info("📊 Usando dados reais do banco")
     
     usuario_choices = sorted(usuarios["usuario"].dropna().unique())
-    selected_users = st.sidebar.multiselect("Filtrar por agente", usuario_choices, default=usuario_choices)
+    requested_agents = {"CARLOS", "CARLOS2", "LEONARDO", "LEONARDO2"}
+    default_users = [
+        user for user in usuario_choices
+        if _normalizar_texto(user) in requested_agents
+    ]
+    selected_users = st.sidebar.multiselect(
+        "Filtrar por agente", usuario_choices,
+        default=default_users or usuario_choices,
+    )
 
     contratos, movimentos, contratos_excluidos = filter_cancelled_contracts(contratos, movimentos)
     if selected_users and len(selected_users) < len(usuario_choices):
@@ -2632,6 +3100,29 @@ def main():
         period_end=period_end_exclusive
     )
 
+    if period_active:
+        evolution_start = start_date
+        evolution_end = end_date
+        evolution_contracts = dataset_base_contratos
+    else:
+        evolution_contracts = contratos_total
+        evolution_start = evolution_contracts["dtinicio"].min() if evolution_contracts["dtinicio"].notna().any() else today
+        evolution_end = today
+    capital_evolution_all = build_capital_evolution(
+        evolution_contracts, movimentos_total, evolution_start, evolution_end
+    )
+    capital_evolution_5000 = build_capital_evolution(
+        evolution_contracts, movimentos_total, evolution_start, evolution_end, max_contract_value=5000
+    )
+    clientes_pagamento, resumo_clientes_pagamento, contratos_finalizados = build_customer_payment_analysis(
+        contratos_total, movimentos_total
+    )
+    profile_score_report = build_profile_score_report(contratos_total, movimentos_total, clientes)
+    profile_recommendation_summary = build_profile_recommendation_summary(profile_score_report)
+    atraso_atual_contrato = movimentos_total.loc[
+        movimentos_total["vencido"] & ~movimentos_total["status_pago"]
+    ].groupby("idcontrato")["dias_atraso"].max()
+
     # ---- Dados auxiliares para o relatório ---------------------------------
     new_ct = contratos[contratos["dtinicio"].notna()].copy()
     if period_active:
@@ -2672,10 +3163,19 @@ def main():
         "recovery": recovery, "dow": dow, "agentes": agentes,
         "best_agente": best_agente, "pior_agente": pior_agente,
         "best_dow": best_dow, "worst_dow": worst_dow,
+        "insights": insights,
         "viab": viab, "monthly_profit": monthly_profit,
         "new_ct": new_ct, "seg": seg, "prio": prio,
         "backlog_df": backlog_df, "pdd_df": pdd_df, "roll_rate": roll_rate,
         "monthly_eff": monthly_eff,
+        "capital_evolution_all": capital_evolution_all,
+        "capital_evolution_5000": capital_evolution_5000,
+        "clientes_pagamento": clientes_pagamento,
+        "resumo_clientes_pagamento": resumo_clientes_pagamento,
+        "contratos_finalizados": contratos_finalizados,
+        "atraso_atual_contrato": atraso_atual_contrato,
+        "profile_score_report": profile_score_report,
+        "profile_recommendation_summary": profile_recommendation_summary,
     }
 
     # ---- Seletor e exibicao do relatorio -----------------------------------
@@ -2685,8 +3185,10 @@ def main():
         key="rel_scope",
     )
     if scope.startswith("Por página"):
-        paginas_opcoes = ["Visao Geral", "Fluxo de Caixa", "Risco & Cobranca", "Agentes",
-                          "Carteira", "Rentabilidade", "Viabilidade & Lucro"]
+        paginas_opcoes = ["Visao Geral", "Clientes e Principal", "Capital e Retorno", "Fluxo de Caixa", "Risco & Cobranca",
+                  "Cobranca Detalhada", "Agentes", "Carteira", "Detalhes da Carteira", "Pontuacao de Perfis",
+                  "Rentabilidade", "Lucro Mensal", "Viabilidade & Lucro",
+                  "Insights Prescritivos", "Controle"]
         paginas_sel = st.sidebar.multiselect("Páginas do relatório", paginas_opcoes, default=paginas_opcoes)
     else:
         paginas_sel = []
@@ -2709,7 +3211,7 @@ def main():
     if use_fake_data and FAKER_AVAILABLE:
         st.info("📊 **Modo de Demonstração:** Exibindo dados gerados aleatoriamente com Faker. Os dados são para fins de demonstração apenas.")
 
-    paginas = ["Visao Geral", "Fluxo de Caixa", "Risco & Cobranca", "Agentes", "Carteira",
+    paginas = ["Visao Geral", "Clientes e Principal", "Pontuacao de Perfis", "Fluxo de Caixa", "Risco & Cobranca", "Agentes", "Carteira",
                "Rentabilidade", "Viabilidade & Lucro", "Simulador Financeiro",
                "Modelos Preditivos",
                "Visualizacoes", "Dados"]
@@ -2769,6 +3271,127 @@ def main():
                 f"**Eficiencia:** {eficiencia_periodo:.1%} | "
                 f"**Parcelas:** {parcelas_vencidas} vencidas, {parcelas_pagas} pagas, {parcelas_abertas} em aberto")
 
+        st.markdown("##### Evolucao do capital e retorno")
+        cenarios = {
+            "Todos os contratos": ctx["capital_evolution_all"],
+            "Contratos ate R$ 5.000": ctx["capital_evolution_5000"],
+        }
+        cenario_nome = st.radio("Cenario do teto de emprestimo", list(cenarios), horizontal=True)
+        evolucao = cenarios[cenario_nome]
+        ev1, ev2, ev3, ev4 = st.columns(4)
+        ev1.metric("Capital investido", fmt_brl(evolucao["total_invested"]), f"{evolucao['contract_count']} contratos")
+        ev2.metric("Capital devolvido", fmt_brl(evolucao["principal_returned"]))
+        ev3.metric("Juros devolvidos", fmt_brl(evolucao["interest_returned"]), f"{evolucao['interest_returned'] / evolucao['principal_returned'] * 100:.1f}% do capital" if evolucao['principal_returned'] else "0%")
+        ev4.metric("Lucro bruto", fmt_brl(evolucao["profit"]), f"Margem sobre capital devolvido: {evolucao['margin_pct']:.1f}%")
+        st.caption(
+            f"Capital ainda exposto: {fmt_brl(evolucao['open_principal'])} | "
+            f"Saldo bruto 90+: {fmt_brl(evolucao['open_90'])} | "
+            f"Recebido total no periodo: {fmt_brl(evolucao['total_received'])} | "
+            f"ROI sobre capital investido: {evolucao['roi_invested_pct']:.1f}%"
+        )
+        ab1, ab2, ab3 = st.columns(3)
+        ab1.metric("Abatimentos / descontos", fmt_brl(evolucao["discounts"]), "campo desconto")
+        ab2.metric("Lucro apos 90+", fmt_brl(evolucao["profit_after_pdd"]), f"PDD: {fmt_brl(evolucao['pdd'])}")
+        ab3.metric("Lucro apos 90+ (%)", f"{evolucao['profit_after_pdd'] / evolucao['principal_returned'] * 100:.1f}%" if evolucao['principal_returned'] else "0%", "sobre capital devolvido")
+        st.caption(
+            f"Calculo: juros devolvidos {fmt_brl(evolucao['interest_returned'])} "
+            f"- descontos {fmt_brl(evolucao['discounts'])} "
+            f"- PDD 90+ {fmt_brl(evolucao['pdd'])} "
+            f"= lucro apos 90+ {fmt_brl(evolucao['profit_after_pdd'])}."
+        )
+        st.markdown("##### Recuperacao do investimento e lucro real")
+        rc1, rc2, rc3 = st.columns(3)
+        rc1.metric(
+            "Capital ainda a recuperar",
+            fmt_brl(evolucao["capital_to_recover"]),
+            "investido - capital devolvido",
+        )
+        rc2.metric(
+            "Saldo dos juros apos capital",
+            fmt_brl(evolucao["interest_after_capital_completion"]),
+            f"{evolucao['interest_after_capital_pct']:.1f}% do capital investido",
+        )
+        rc3.metric(
+            "Lucro real realizado",
+            fmt_brl(evolucao["real_profit"]),
+            "juros - descontos - PDD",
+        )
+        st.caption(
+            f"Calculo: juros devolvidos {fmt_brl(evolucao['interest_returned'])} "
+            f"- capital ainda a recuperar {fmt_brl(evolucao['capital_to_recover'])} "
+            f"= saldo dos juros {fmt_brl(evolucao['interest_after_capital_completion'])}. "
+            f"Percentual: saldo dos juros / capital investido = {evolucao['interest_after_capital_pct']:.1f}%."
+        )
+        st.markdown("##### Simulacao: recebimento dos proximos 30 dias")
+        sim_percentual = st.slider(
+            "Percentual do saldo previsto pago",
+            min_value=0, max_value=100, value=100, step=5,
+            format="%d%%", key=f"sim_30_{cenario_nome}",
+        )
+        sim_fator = sim_percentual / 100
+        sim_principal = evolucao["next_30_principal"] * sim_fator
+        sim_interest = evolucao["next_30_interest"] * sim_fator
+        sim_capital_to_recover = max(evolucao["capital_to_recover"] - sim_principal, 0)
+        sim_interest_after_capital = evolucao["interest_after_capital_completion"] + sim_interest
+        sim_interest_pct = (
+            sim_interest_after_capital / evolucao["total_invested"] * 100
+            if evolucao["total_invested"] else 0
+        )
+        st.caption(
+            f"Saldo previsto em 30 dias: {fmt_brl(evolucao['next_30_total'])} "
+            f"({fmt_brl(evolucao['next_30_principal'])} de capital e "
+            f"{fmt_brl(evolucao['next_30_interest'])} de juros)."
+        )
+        s1, s2, s3, s4 = st.columns(4)
+        s1.metric("Recebimento simulado", fmt_brl(evolucao["next_30_total"] * sim_fator))
+        s2.metric("Capital devolvido", fmt_brl(sim_principal), f"{sim_percentual}% do previsto")
+        s3.metric("Juros devolvidos", fmt_brl(sim_interest), f"{sim_percentual}% do previsto")
+        s4.metric("Capital ainda a recuperar", fmt_brl(sim_capital_to_recover))
+        st.info(
+            f"Com {sim_percentual}% de pagamento, o saldo dos juros apos completar o capital "
+            f"fica em {fmt_brl(sim_interest_after_capital)}, equivalente a {sim_interest_pct:.1f}% "
+            "do capital investido."
+        )
+        lucro_risco = pd.DataFrame([
+            {
+                "Faixa": f"{threshold}+ dias",
+                "Saldo bruto em atraso (R$)": values["open"],
+                "PDD estimada (R$)": values["pdd"],
+                "Lucro apos PDD (R$)": values["profit_after_pdd"],
+                "Lucro apos PDD (%)": values["margin_pct"],
+            }
+            for threshold, values in evolucao["profit_by_threshold"].items()
+        ])
+        st.markdown("##### Lucro ajustado por faixa de atraso")
+        st.caption("O saldo bruto em atraso e a PDD sao diferentes: PDD representa a perda estimada sobre esse saldo.")
+        lucro_view = lucro_risco.copy()
+        lucro_view["Lucro apos PDD (%)"] = lucro_view["Lucro apos PDD (%)"].round(1).astype(str) + "%"
+        st.dataframe(lucro_view, hide_index=True, use_container_width=True)
+        evolucao_view = evolucao["monthly"].rename(columns={
+            "mes_label": "Mes", "capital_investido": "Capital investido (R$)",
+            "capital_devolvido": "Capital devolvido (R$)",
+            "juros_devolvidos": "Juros devolvidos (R$)",
+            "capital_exposto": "Capital exposto (R$)",
+            "lucro_acumulado": "Lucro acumulado (R$)",
+        })
+        fig_evolucao = go.Figure()
+        fig_evolucao.add_trace(go.Bar(x=evolucao_view["Mes"], y=evolucao_view["Capital investido (R$)"], name="Investido"))
+        fig_evolucao.add_trace(go.Bar(x=evolucao_view["Mes"], y=evolucao_view["Capital devolvido (R$)"], name="Capital devolvido"))
+        fig_evolucao.add_trace(go.Bar(x=evolucao_view["Mes"], y=evolucao_view["Juros devolvidos (R$)"], name="Juros devolvidos"))
+        fig_evolucao.add_trace(go.Scatter(x=evolucao_view["Mes"], y=evolucao_view["Capital exposto (R$)"], name="Capital exposto", mode="lines+markers"))
+        fig_evolucao.update_layout(
+            barmode="group", height=430,
+            title="Investimento, devolucoes e capital exposto por mes",
+            xaxis_title="Mes", yaxis_title="Valor (R$)",
+            legend=dict(orientation="h", y=1.12),
+        )
+        st.plotly_chart(fig_evolucao, use_container_width=True, config={"displayModeBar": False})
+        st.dataframe(
+            evolucao_view[["Mes", "Capital investido (R$)", "Capital devolvido (R$)",
+                           "Juros devolvidos (R$)", "Capital exposto (R$)", "Lucro acumulado (R$)"]].round(2),
+            hide_index=True, use_container_width=True,
+        )
+
         st.markdown("##### Composicao do saldo em aberto")
         sit_df = pd.DataFrame({
             "situacao": ["A vencer 0-30d", "A vencer 31-60d", "A vencer 60+",
@@ -2812,7 +3435,170 @@ def main():
                 st.markdown(f"**{k}**: {v}")
 
     # =========================================================================
-    # TAB 2 - FLUXO DE CAIXA
+    # TAB 2 - CLIENTES E PRINCIPAL
+    # =========================================================================
+    elif aba == "Clientes e Principal":
+        st.subheader("Clientes pagantes e retorno do principal")
+        st.caption("Pagante: sem parcela vencida e nao paga acima de 30 dias. Inadimplente: atraso atual de 31 dias ou mais.")
+
+        base_clientes = ctx["clientes_pagamento"]
+        resumo_clientes = ctx["resumo_clientes_pagamento"]
+        if base_clientes.empty:
+            st.info("Sem dados de clientes para o filtro atual.")
+        else:
+            total_clientes = len(base_clientes)
+            pagantes = int((base_clientes["status_pagamento"] == "Pagante").sum())
+            inadimplentes = total_clientes - pagantes
+            principal_vigente = base_clientes["principal_vigente"].sum()
+            principal_vigente_recuperado = base_clientes["principal_vigente_recuperado"].sum()
+
+            k1, k2, k3, k4 = st.columns(4)
+            k1.metric("Clientes pagantes", f"{pagantes}", f"{pagantes / total_clientes:.1%} do total")
+            k2.metric("Clientes inadimplentes", f"{inadimplentes}", f"{inadimplentes / total_clientes:.1%} do total")
+            k3.metric("Principal vigente", fmt_brl(principal_vigente))
+            k4.metric("Principal vigente recuperado", fmt_brl(principal_vigente_recuperado),
+                      f"{principal_vigente_recuperado / principal_vigente:.1%} de retorno" if principal_vigente else "0% de retorno")
+
+            st.markdown("##### Geral e por genero")
+            geral = base_clientes.groupby("status_pagamento", as_index=False).agg(
+                clientes=("idcliente", "nunique"),
+                principal_contratado=("principal_contratado", "sum"),
+                principal_recuperado=("principal_recuperado", "sum"),
+                principal_a_recuperar=("principal_a_recuperar", "sum"),
+                principal_vigente=("principal_vigente", "sum"),
+                principal_vigente_recuperado=("principal_vigente_recuperado", "sum"),
+            )
+            geral.insert(0, "genero_cat", "Geral")
+            tabela = pd.concat([geral, resumo_clientes], ignore_index=True)
+            tabela["pct_clientes"] = tabela["clientes"] / tabela.groupby("genero_cat")["clientes"].transform("sum")
+            tabela["retorno_principal_pct"] = tabela["principal_recuperado"] / tabela["principal_contratado"].replace(0, np.nan)
+            tabela["vigente_retorno_principal_pct"] = tabela["principal_vigente_recuperado"] / tabela["principal_vigente"].replace(0, np.nan)
+            tabela = tabela.fillna(0)
+            tabela = tabela.rename(columns={
+                "genero_cat": "Genero", "status_pagamento": "Situacao",
+                "clientes": "Clientes", "pct_clientes": "% clientes",
+                "principal_contratado": "Principal contratado (R$)",
+                "principal_recuperado": "Principal recuperado (R$)",
+                "principal_a_recuperar": "Principal a recuperar (R$)",
+                "retorno_principal_pct": "Retorno principal (%)",
+                "principal_vigente": "Vigente - principal (R$)",
+                "principal_vigente_recuperado": "Vigente - recuperado (R$)",
+                "vigente_retorno_principal_pct": "Vigente - retorno (%)",
+            })
+            percentuais = ["% clientes", "Retorno principal (%)", "Vigente - retorno (%)"]
+            tabela_view = tabela.copy()
+            tabela_view[percentuais] = tabela_view[percentuais].mul(100).round(1).astype(str) + "%"
+            valores = [col for col in tabela_view.columns if "(R$)" in col]
+            tabela_view[valores] = tabela_view[valores].round(2)
+            show(tabela_view[["Genero", "Situacao", "Clientes", "% clientes", "Vigente - principal (R$)",
+                              "Vigente - recuperado (R$)", "Vigente - retorno (%)"]])
+
+            grafico = tabela.copy()
+            grafico["grupo"] = grafico["Genero"] + " - " + grafico["Situacao"]
+            fig_clientes = px.bar(grafico, x="grupo", y="Clientes", color="Situacao",
+                                  barmode="group", title="Quantidade de clientes por situacao e genero",
+                                  color_discrete_map={"Pagante": COLORS["verde"], "Inadimplente": COLORS["vermelho"]})
+            fig_clientes.update_layout(height=360, xaxis_title="", yaxis_title="Clientes")
+            st.plotly_chart(fig_clientes, use_container_width=True, config={"displayModeBar": False})
+
+            st.markdown("##### Detalhamento por cliente")
+            detalhe = base_clientes.rename(columns={
+                "idcliente": "ID cliente", "cliente": "Cliente", "genero_cat": "Genero",
+                "status_pagamento": "Situacao", "maior_atraso": "Maior atraso atual (dias)",
+                "principal_contratado": "Principal contratado (R$)",
+                "principal_recuperado": "Principal recuperado (R$)",
+                "principal_a_recuperar": "Principal a recuperar (R$)",
+                "vigente_retorno_principal_pct": "Vigente - retorno (%)",
+            })
+            detalhe["Vigente - retorno (%)"] = (detalhe["Vigente - retorno (%)"] * 100).round(1)
+            detalhe = detalhe.sort_values(["Situacao", "Maior atraso atual (dias)"], ascending=[True, False])
+            show(detalhe[["ID cliente", "Cliente", "Genero", "Situacao", "Maior atraso atual (dias)",
+                          "Principal contratado (R$)", "Principal recuperado (R$)", "Principal a recuperar (R$)",
+                          "Vigente - retorno (%)"]].round(2))
+
+            st.markdown("##### Contratos Vigente: detalhe de pagamento")
+            contratos_detalhe = ctx["contratos_total"].copy()
+            contratos_detalhe = contratos_detalhe[contratos_detalhe["status"] == "Vigente"].copy()
+            contratos_detalhe["atraso_atual"] = contratos_detalhe["id"].map(ctx["atraso_atual_contrato"]).fillna(0)
+            status_detalhe = st.multiselect(
+                "Status de pagamento", ["Pagante", "Inadimplente"],
+                default=["Pagante", "Inadimplente"],
+                key="clientes_principal_status",
+            )
+            contratos_detalhe["situacao_pagamento"] = np.where(
+                contratos_detalhe["atraso_atual"] >= 31, "Inadimplente", "Pagante"
+            )
+            contratos_detalhe = contratos_detalhe[contratos_detalhe["situacao_pagamento"].isin(status_detalhe)].copy()
+            contratos_detalhe["principal_recuperado"] = contratos_detalhe["total_recebido"] * contratos_detalhe["frac_principal"]
+            contratos_detalhe["principal_a_recuperar"] = (contratos_detalhe["valor"] - contratos_detalhe["principal_recuperado"]).clip(lower=0)
+            contrato_view = contratos_detalhe.rename(columns={
+                "id": "ID contrato", "idcliente": "ID cliente", "cliente": "Cliente",
+                "genero_cat": "Genero", "status": "Status contrato",
+                "valor": "Principal contratado (R$)", "principal_recuperado": "Principal recuperado (R$)",
+                "principal_a_recuperar": "Principal a recuperar (R$)",
+                "atraso_atual": "Maior atraso atual (dias)", "situacao_pagamento": "Situacao pagamento",
+            })
+            show(contrato_view[["ID contrato", "ID cliente", "Cliente", "Genero", "Status contrato",
+                                "Situacao pagamento", "Maior atraso atual (dias)", "Principal contratado (R$)",
+                                "Principal recuperado (R$)", "Principal a recuperar (R$)"]].round(2))
+
+            st.markdown("##### Contratos Finalizado: recuperacao e residuo")
+            finalizados_view = ctx["contratos_finalizados"].rename(columns={
+                "id_contrato": "ID contrato", "idcliente": "ID cliente", "cliente": "Cliente",
+                "genero_cat": "Genero", "valor": "Principal contratado (R$)",
+                "total_recebido": "Total recebido (R$)", "total_desconto": "Descontos (R$)",
+                "total_aberto": "Saldo residual (R$)", "principal_recuperado": "Principal recuperado (R$)",
+                "principal_residual": "Principal residual (R$)",
+                "retorno_principal_pct": "Retorno do principal (%)",
+            }).copy()
+            finalizados_view["Retorno do principal (%)"] = (finalizados_view["Retorno do principal (%)"] * 100).round(1)
+            show(finalizados_view[["ID contrato", "ID cliente", "Cliente", "Genero", "Principal contratado (R$)",
+                                   "Total recebido (R$)", "Descontos (R$)", "Saldo residual (R$)",
+                                   "Principal recuperado (R$)", "Principal residual (R$)",
+                                   "Retorno do principal (%)"]].round(2))
+
+    # =========================================================================
+    # TAB 3 - PONTUACAO DE PERFIS
+    # =========================================================================
+    elif aba == "Pontuacao de Perfis":
+        st.subheader("Pontuacao de perfis para novos contratos")
+        st.caption("Score de 0 a 100 baseado no resultado de risco observado e no retorno do principal.")
+        st.info("Regra: 60% resultado de risco + 40% retorno do principal, ajustada pela confianca da amostra. Recomendado >= 75; Atencao de 50 a 74,9; Evitar < 50.")
+        recomendacao = ctx["profile_recommendation_summary"]
+        resumo_ideal, resumo_recusado = st.columns(2)
+        with resumo_ideal:
+            st.markdown("##### Perfil ideal para testar primeiro")
+            st.caption("Score >= 75 e confianca >= 50%. Use como prioridade de prospeccao, nao como aprovacao automatica.")
+            for row in recomendacao["ideais"]:
+                st.success(f"{row['dimensao']}: {row['perfil']} | score {row['score']:.1f} | "
+                           f"{row['contratos']} contratos | confianca {row['confianca']:.0%}")
+        with resumo_recusado:
+            st.markdown("##### Perfil recusado ou para analise manual")
+            st.caption("Score < 50 e confianca >= 50%. Os demais piores resultados exigem teste controlado.")
+            for row in recomendacao["recusados"]:
+                st.error(f"{row['dimensao']}: {row['perfil']} | score {row['score']:.1f} | "
+                         f"{row['contratos']} contratos | confianca {row['confianca']:.0%}")
+        for dimensao in ["Idade", "Genero", "Valor do contrato", "Segmento", "Genero e idade", "Genero e valor", "Idade e valor"]:
+            st.markdown(f"##### Perfil por {dimensao.lower()}")
+            tabela_score = ctx["profile_score_report"].get(dimensao, pd.DataFrame()).copy()
+            if tabela_score.empty:
+                st.info("Sem dados suficientes.")
+                continue
+            tabela_score["retorno_principal"] = tabela_score["retorno_principal"].astype(str) + "%"
+            tabela_score["resultado_risco"] = tabela_score["resultado_risco"].astype(str) + "%"
+            tabela_score = tabela_score.rename(columns={
+                "Perfil": "Perfil", "contratos": "Contratos", "clientes": "Clientes",
+                "retorno_principal": "Retorno principal", "resultado_risco": "Resultado de risco",
+                "principal": "Principal (R$)", "score": "Score", "classificacao": "Classificacao",
+                "score_observado": "Score observado", "confianca": "Confianca",
+            })
+            tabela_score["Confianca"] = (tabela_score["Confianca"] * 100).round(0).astype(str) + "%"
+            show(tabela_score[["Perfil", "Contratos", "Clientes", "Retorno principal",
+                               "Resultado de risco", "Principal (R$)", "Score observado", "Confianca",
+                               "Score", "Classificacao"]])
+
+    # =========================================================================
+    # TAB 4 - FLUXO DE CAIXA
     # =========================================================================
     elif aba == "Fluxo de Caixa":
         st.subheader("Fluxo de caixa: cronograma contratual vs caixa efetivo")
@@ -3340,6 +4126,39 @@ def main():
         ])
         show(regras_estr)
 
+        def _view_contratos(df_contratos, ids_clientes=None, sel_id=None):
+            """Tabela resumida de contratos formatada para exibicao."""
+            sel = df_contratos if sel_id is None else df_contratos[df_contratos["idcliente"] == sel_id]
+            if ids_clientes is not None:
+                sel = sel[sel["idcliente"].isin(ids_clientes)]
+            if sel.empty:
+                return sel.copy()
+            v = sel.sort_values(["idcliente", "dtinicio"], na_position="last").copy()
+            v = v.rename(columns={
+                "id": "Contrato", "idcliente": "ID Cliente", "status": "Status",
+                "dtinicio": "Início", "dtfim": "Fim", "valor": "Principal (R$)",
+                "valor_parcelado": "A receber (R$)", "juros_previstos": "Juros prev. (R$)",
+                "total_recebido": "Recebido (R$)", "aberto_nao_pago": "Em aberto (R$)",
+                "max_atraso": "Atraso máx. (d)", "default_90d": "Default 90d",
+            })
+            if "cliente" in v.columns:
+                v = v.rename(columns={"cliente": "Cliente"})
+            v["% Recebido"] = (v["percentual_recebido"] * 100).round(1)
+            v["Parc. pagas"] = v["parcelas_pagas"].astype(int)
+            v["Parc. tot"] = v["parcelas_total"].astype(int)
+            for c in ["Principal (R$)", "A receber (R$)", "Juros prev. (R$)", "Recebido (R$)", "Em aberto (R$)"]:
+                if c in v.columns:
+                    v[c] = v[c].round(2)
+            for c in ["Início", "Fim"]:
+                if c in v.columns and pd.api.types.is_datetime64_any_dtype(v[c]):
+                    v[c] = pd.to_datetime(v[c]).dt.strftime("%Y-%m-%d").fillna("-")
+            keep = ["Cliente", "ID Cliente", "Contrato", "Status", "Início", "Fim",
+                    "Principal (R$)", "A receber (R$)", "Juros prev. (R$)",
+                    "Parc. pagas", "Parc. tot", "% Recebido",
+                    "Recebido (R$)", "Em aberto (R$)", "Atraso máx. (d)", "Default 90d"]
+            keep = [c for c in keep if c in v.columns]
+            return v[keep]
+
         st.markdown("##### Simulador de valor inicial")
         clientes_disp = sorted(clientes["id"].astype(int).tolist()) if clientes is not None and len(clientes) else []
         sel_id = st.selectbox("Escolha um cliente (por id)", clientes_disp) if clientes_disp else None
@@ -3352,13 +4171,48 @@ def main():
                      f"{perfil['receb_pct']:.1%}" if perfil["receb_pct"] is not None else
                      f"**Perfil do cliente #{sel_id}:** sem histórico (cliente novo).")
             st.info(f"**Classificação de risco:** 🎯 {rec['classe']} — {rec['descricao']}")
+            if perfil.get('n_finalizados', 0) > 0 or perfil.get('n_vigentes', 0) > 0:
+                st.caption(f"Histórico: {perfil['n_contratos']} contrato(s) — "
+                           f"{perfil.get('n_finalizados', 0)} finalizados/quitados, "
+                           f"{perfil.get('n_vigentes', 0)} vigentes · "
+                           f"ticket já comprovado de até R$ {perfil.get('valor_solicitado', 0):,.0f}")
             st.success(f"💡 **Valor inicial sugerido:** R$ {rec['valor_inicial']:,.0f} "
                        f"({rec['pct_inicial']:.0%} do teto de R$ {rec['teto']:,.0f})")
-            st.caption("Plano de escalonamento (conforme cada contrato é pago em dia):")
-            plano_txt = "\n".join(
-                f"- **Etapa {p['etapa']}:** até R$ {p['capacidade']:,.0f} ({p['pct_teto']:.0%} do teto) — "
-                f"quando {p['condicao']}" for p in rec["plano"])
-            st.markdown(plano_txt)
+            if rec["plano"]:
+                st.caption("Plano de escalonamento (conforme cada contrato é pago em dia):")
+                plano_txt = "\n".join(
+                    f"- **Etapa {p['etapa']}:** até R$ {p['capacidade']:,.0f} ({p['pct_teto']:.0%} do teto) — "
+                    f"quando {p['condicao']}" for p in rec["plano"])
+                st.markdown(plano_txt)
+
+            st.markdown("---")
+            st.markdown("##### Histórico de contratos do cliente")
+            ctr_hist = contratos[contratos["idcliente"] == sel_id].copy()
+            if clientes is not None and not clientes.empty:
+                cli_row = clientes[clientes["id"] == sel_id]
+                if not cli_row.empty:
+                    r = cli_row.iloc[0]
+                    idd = r.get("idade", None)
+                    idd_txt = f"{int(idd)} anos" if pd.notna(idd) else f"({r.get('faixa_idade', '-')})"
+                    st.info(f"**{r.get('cliente', '-')}** (#{sel_id}) — {r.get('genero_cat', '-')}, {idd_txt} · "
+                            f"{r.get('nome_estabelecimento', '-')} · Avaliação: {r.get('avaliacao', '-')}")
+            if ctr_hist.empty:
+                st.info("Cliente sem contratos na base.")
+            else:
+                show(_view_contratos(contratos, sel_id=sel_id))
+                n_fin = int(ctr_hist["status"].isin(["Finalizado", "Quitado"]).sum())
+                n_vig = int(ctr_hist["status"].eq("Vigente").sum())
+                h1, h2, h3, h4, h5 = st.columns(5)
+                h1.metric("Contratos", len(ctr_hist))
+                h2.metric("Finalizados/Quitados", n_fin, f"{n_vig} vigentes")
+                h3.metric("Principal contratado", fmt_brl(ctr_hist["valor"].sum()))
+                h4.metric("Total recebido", fmt_brl(ctr_hist["total_recebido"].sum()))
+                h5.metric("Em aberto", fmt_brl(ctr_hist["aberto_nao_pago"].sum()))
+                pagas_t = int(ctr_hist["parcelas_pagas"].sum())
+                tot_t = int(ctr_hist["parcelas_total"].sum())
+                pct_p = pagas_t / tot_t if tot_t else 0
+                st.caption(f"Parcelas pagas: **{pagas_t}** de {tot_t} ({pct_p:.1%}) · "
+                           f"Contratos com default 90d: **{int(ctr_hist['default_90d'].sum())}**")
 
         st.markdown("---")
         st.subheader("Simulador de viabilidade por perfil")
@@ -3421,6 +4275,61 @@ def main():
         if res["valor_inicial_sugerido"]:
             st.info(f"💡 **Valor inicial recomendado para este perfil:** R$ {res['valor_inicial_sugerido']:,.0f} "
                     f"de um total de R$ {s_valor:,.0f} solicitado.")
+
+        st.markdown("---")
+        st.markdown("##### Clientes do perfil simulado")
+        st.caption("Clientes e contratos da base usados como amostra pelo simulador (mesmos filtros de sexo, idade exata e segmento).")
+        am_sel = movimentos[~movimentos["dtvenc"].isna()].copy()
+        if s_genero != "Todos":
+            am_sel = am_sel[am_sel["genero_cat"] == s_genero]
+        if s_idade is not None:
+            am_sel = am_sel[am_sel["idade"] == s_idade]
+        if s_categoria != "Todas":
+            am_sel = am_sel[am_sel["categoria_estabelecimento"] == s_categoria]
+        if s_subcategoria != "Todas":
+            am_sel = am_sel[am_sel["subcategoria_estabelecimento"] == s_subcategoria]
+        ids_sel = am_sel["idcliente"].dropna().unique()
+        if len(ids_sel) == 0:
+            st.info("Nenhum cliente da base corresponde ao perfil selecionado.")
+        else:
+            base_cli = clientes[clientes["id"].isin(ids_sel)].copy() if clientes is not None else pd.DataFrame()
+            if base_cli.empty:
+                st.info("Nenhum cliente da base corresponde ao perfil selecionado.")
+            else:
+                ctr_perf = contratos[contratos["idcliente"].isin(ids_sel)].copy()
+                cli_agg = ctr_perf.groupby("idcliente").agg(
+                    Contratos=("id", "count"),
+                    Finalizados=("status", lambda s: int(s.isin(["Finalizado", "Quitado"]).sum())),
+                    Vigentes=("status", lambda s: int(s.eq("Vigente").sum())),
+                    Principal=("valor", "sum"),
+                    Recebido=("total_recebido", "sum"),
+                    Em_aberto=("aberto_nao_pago", "sum"),
+                    Parcelas_ok=("parcelas_pagas", "sum"),
+                    Parcelas_total=("parcelas_total", "sum"),
+                    Default_90d=("default_90d", "sum"),
+                ).reset_index()
+                cli_agg = cli_agg.merge(
+                    clientes[["id", "cliente", "genero_cat", "idade", "faixa_idade",
+                              "avaliacao", "nome_estabelecimento"]],
+                    left_on="idcliente", right_on="id", how="left",
+                )
+                cli_agg["% Parcelas pagas"] = (cli_agg["Parcelas_ok"]
+                                               / cli_agg["Parcelas_total"].replace(0, np.nan) * 100).round(1)
+                cli_agg["idade"] = cli_agg["idade"].apply(lambda v: int(v) if pd.notna(v) else np.nan)
+                col_sel = ["cliente", "genero_cat", "idade", "faixa_idade", "avaliacao",
+                           "nome_estabelecimento", "Contratos", "Finalizados", "Vigentes",
+                           "Principal", "Recebido", "Em_aberto", "% Parcelas pagas", "Default_90d"]
+                cli_agg = cli_agg[col_sel]
+                cli_agg.columns = ["Cliente", "Gênero", "Idade", "Faixa etária", "Avaliação",
+                                   "Estabelecimento", "Contratos", "Finalizados", "Vigentes",
+                                   "Principal (R$)", "Recebido (R$)", "Em aberto (R$)",
+                                   "% Parcelas pagas", "Default 90d"]
+                for cc2 in ["Principal (R$)", "Recebido (R$)", "Em aberto (R$)"]:
+                    cli_agg[cc2] = cli_agg[cc2].round(2)
+                show(cli_agg)
+                if not ctr_perf.empty:
+                    with st.expander("Ver contratos da amostra (detalhado)"):
+                        show(_view_contratos(ctr_perf))
 
         if res["eficiencia"] is not None and movimentos is not None and len(movimentos):
             geral = movimentos[~movimentos["dtvenc"].isna()].copy()
